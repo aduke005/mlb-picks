@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>MLB Hit Picks</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --muted: #8b949e;
+  --green: #3fb950;
+  --red: #f85149;
+  --yellow: #d29922;
+  --blue: #58a6ff;
+  --inset: #0d1117;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', sans-serif;
+  padding: 16px;
+  padding-top: max(20px, env(safe-area-inset-top));
+  padding-bottom: max(20px, env(safe-area-inset-bottom));
+  max-width: 480px;
+  margin: 0 auto;
+  min-height: 100vh;
+}
+
+header { text-align: center; padding: 12px 0 20px; }
+
+h1 {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: var(--blue);
+  letter-spacing: -0.02em;
+}
+
+.subtitle { font-size: 0.82rem; color: var(--muted); margin-top: 4px; }
+
+/* ---- Cards ---- */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  margin: 12px 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.card::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 3px;
+}
+.card.rank-0::before { background: linear-gradient(90deg, #ffd700, #ffb300); }
+.card.rank-1::before { background: linear-gradient(90deg, #c0c0c0, #9e9e9e); }
+.card.rank-2::before { background: linear-gradient(90deg, #cd7f32, #a0522d); }
+.card.rank-3::before,
+.card.rank-4::before,
+.card.rank-5::before { background: var(--border); }
+
+.rank-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.card.rank-0 .rank-label { color: #ffd700; }
+.card.rank-1 .rank-label { color: #c0c0c0; }
+.card.rank-2 .rank-label { color: #cd7f32; }
+
+.batter-name {
+  font-size: 1.35rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.batter-team { font-size: 0.85rem; color: var(--muted); margin-top: 2px; }
+
+.prob-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+
+.prob-pct {
+  font-size: 2.6rem;
+  font-weight: 800;
+  color: var(--green);
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.prob-label { font-size: 0.8rem; color: var(--muted); line-height: 1.3; }
+
+.matchup-line { font-size: 0.85rem; color: var(--text); margin-bottom: 2px; }
+.game-time    { font-size: 0.75rem; color: var(--muted); margin-bottom: 10px; }
+
+/* ---- Stat rows ---- */
+.stat-group-label {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  margin-bottom: 4px;
+  opacity: 0.7;
+}
+
+.stats-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.stat {
+  flex: 1;
+  background: var(--inset);
+  border-radius: 8px;
+  padding: 7px 4px;
+  text-align: center;
+}
+
+.stat-value {
+  font-size: 1.0rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+  font-size: 0.6rem;
+  color: var(--muted);
+  margin-top: 2px;
+  line-height: 1.2;
+}
+
+/* ---- Factor rows ---- */
+.factors {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  margin-top: 4px;
+}
+
+.factor {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+  font-size: 0.78rem;
+}
+
+.factor-name { color: var(--muted); }
+.factor-val  { font-weight: 600; }
+.good    { color: var(--green); }
+.bad     { color: var(--red); }
+.neutral { color: var(--yellow); }
+
+/* ---- States ---- */
+.loading {
+  text-align: center;
+  padding: 60px 20px;
+  color: var(--muted);
+}
+
+.stage {
+  font-size: 0.8rem;
+  margin-top: 8px;
+  min-height: 1.2em;
+}
+
+.spinner {
+  width: 36px; height: 36px;
+  border: 3px solid var(--border);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto 16px;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.info-box {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.info-box strong { color: var(--text); display: block; margin-bottom: 8px; }
+
+.error-box {
+  background: #1f0a0a;
+  border: 1px solid var(--red);
+  border-radius: 12px;
+  padding: 16px;
+  color: var(--red);
+  font-size: 0.85rem;
+}
+
+.refresh-btn {
+  display: block;
+  margin: 16px auto 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--blue);
+  padding: 10px 24px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+footer {
+  text-align: center;
+  padding: 24px 0 8px;
+  font-size: 0.7rem;
+  color: var(--border);
+  line-height: 1.6;
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>⚾ MLB Hit Picks</h1>
+  <div class="subtitle" id="date-label">Loading…</div>
+</header>
+
+<div id="app">
+  <div class="loading">
+    <div class="spinner"></div>
+    Fetching today's matchups…
+  </div>
+</div>
+
+<footer>
+  Data: MLB Stats API · BA · OPS · K% · platoon · ERA · WHIP · K/9 · recent form · park · lineup spot<br>
+  Refresh after lineups post (~3–4 hrs before first pitch)
+</footer>
+
+<script>
+'use strict';
+
+// ─── OPTIONAL: paste a free OpenWeatherMap key for wind data ─────────────────
+// Get one free at https://openweathermap.org/api (Current Weather endpoint)
+const WEATHER_KEY = null;
+// ─────────────────────────────────────────────────────────────────────────────
+
+const API    = 'https://statsapi.mlb.com/api/v1';
+const SEASON = new Date().getFullYear();
+
+// League-average baselines for normalization
+const LEAGUE = {
+  ba:   0.248,
+  ops:  0.720,
+  era:  4.30,
+  whip: 1.25,
+  k9:   9.0,
+  kPct: 0.228,  // batter strikeout %
+};
+
+// Park hit factors by home-team ID (FanGraphs 3-yr regressed hits, 2024)
+const PARK = {
+  115: { factor: 1.20, name: 'Coors Field'             },
+  113: { factor: 1.09, name: 'Great American Ball Park' },
+  140: { factor: 1.07, name: 'Globe Life Field'          },
+  110: { factor: 1.06, name: 'Oriole Park'              },
+  111: { factor: 1.05, name: 'Fenway Park'              },
+  143: { factor: 1.05, name: 'Citizens Bank Park'       },
+  147: { factor: 1.04, name: 'Yankee Stadium'           },
+  158: { factor: 1.03, name: 'American Family Field'    },
+  118: { factor: 1.02, name: 'Kauffman Stadium'         },
+  112: { factor: 1.02, name: 'Wrigley Field'            },
+  144: { factor: 1.01, name: 'Truist Park'              },
+  117: { factor: 1.00, name: 'Minute Maid Park'         },
+  116: { factor: 1.00, name: 'Comerica Park'            },
+  108: { factor: 1.00, name: 'Angel Stadium'            },
+  142: { factor: 0.99, name: 'Target Field'             },
+  114: { factor: 0.99, name: 'Progressive Field'        },
+  138: { factor: 0.98, name: 'Busch Stadium'            },
+  121: { factor: 0.98, name: 'Citi Field'               },
+  119: { factor: 0.97, name: 'Dodger Stadium'           },
+  109: { factor: 0.97, name: 'Chase Field'              },
+  141: { factor: 0.97, name: 'Rogers Centre'            },
+  139: { factor: 0.96, name: 'Tropicana Field'          },
+  120: { factor: 0.96, name: 'Nationals Park'           },
+  146: { factor: 0.96, name: 'loanDepot park'           },
+  145: { factor: 0.96, name: 'Guaranteed Rate Field'    },
+  136: { factor: 0.95, name: 'T-Mobile Park'            },
+  134: { factor: 0.95, name: 'PNC Park'                 },
+  133: { factor: 0.95, name: 'Sutter Health Park'       },
+  137: { factor: 0.93, name: 'Oracle Park'              },
+  135: { factor: 0.92, name: 'Petco Park'               },
+};
+
+// Platoon multipliers on hit rate (opposite-hand matchups favour the batter)
+const PLATOON = {
+  RvR: 0.96, RvL: 1.06,
+  LvL: 0.94, LvR: 1.07,
+  SvR: 1.04, SvL: 1.04,  // switch hitters always bat from favorable side
+};
+
+// Stadium location + open-air flag + compass bearing from home plate → CF
+// (used for wind direction calculation; cf=0 means dome/irrelevant)
+const STADIUM = {
+  115: { lat: 39.756, lon: -104.994, open: true,  cf: 22  }, // COL  Coors
+  113: { lat: 39.097, lon:  -84.507, open: true,  cf:  5  }, // CIN  GABP
+  140: { lat: 32.748, lon:  -97.083, open: true,  cf: 120 }, // TEX  Globe Life
+  110: { lat: 39.284, lon:  -76.622, open: true,  cf:  56 }, // BAL  Camden Yards
+  111: { lat: 42.347, lon:  -71.097, open: true,  cf:  93 }, // BOS  Fenway
+  143: { lat: 39.906, lon:  -75.166, open: true,  cf:  43 }, // PHI  Citizens Bank
+  147: { lat: 40.829, lon:  -73.926, open: true,  cf:  39 }, // NYY  Yankee Stadium
+  158: { lat: 43.029, lon:  -87.971, open: false, cf:   0 }, // MIL  retractable
+  118: { lat: 39.052, lon:  -94.480, open: true,  cf:  49 }, // KC   Kauffman
+  112: { lat: 41.948, lon:  -87.655, open: true,  cf:  35 }, // CHC  Wrigley
+  144: { lat: 33.890, lon:  -84.468, open: true,  cf:  11 }, // ATL  Truist
+  117: { lat: 29.757, lon:  -95.355, open: false, cf:   0 }, // HOU  retractable
+  116: { lat: 42.339, lon:  -83.048, open: true,  cf:  33 }, // DET  Comerica
+  108: { lat: 33.800, lon: -117.883, open: true,  cf: 320 }, // LAA  Angel Stadium
+  142: { lat: 44.982, lon:  -93.278, open: true,  cf: 354 }, // MIN  Target Field
+  114: { lat: 41.496, lon:  -81.685, open: true,  cf:  26 }, // CLE  Progressive
+  138: { lat: 38.623, lon:  -90.193, open: true,  cf:  15 }, // STL  Busch
+  121: { lat: 40.757, lon:  -73.846, open: true,  cf: 354 }, // NYM  Citi Field
+  119: { lat: 34.074, lon: -118.240, open: true,  cf: 346 }, // LAD  Dodger Stadium
+  109: { lat: 33.445, lon: -112.067, open: false, cf:   0 }, // ARI  retractable (usually closed)
+  141: { lat: 43.641, lon:  -79.389, open: false, cf:   0 }, // TOR  dome
+  139: { lat: 27.768, lon:  -82.653, open: false, cf:   0 }, // TB   dome
+  120: { lat: 38.873, lon:  -77.007, open: true,  cf:   5 }, // WSH  Nationals Park
+  146: { lat: 25.778, lon:  -80.220, open: false, cf:   0 }, // MIA  retractable
+  145: { lat: 41.830, lon:  -87.634, open: true,  cf:   8 }, // CHW  Guaranteed Rate
+  136: { lat: 47.591, lon: -122.332, open: false, cf:   0 }, // SEA  retractable
+  134: { lat: 40.447, lon:  -80.006, open: true,  cf: 357 }, // PIT  PNC Park
+  133: { lat: 38.583, lon: -121.502, open: true,  cf:  32 }, // OAK  Sutter Health
+  137: { lat: 37.778, lon: -122.389, open: true,  cf: 315 }, // SF   Oracle Park
+  135: { lat: 32.707, lon: -117.157, open: true,  cf: 328 }, // SD   Petco Park
+};
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+function todayStr() { return new Date().toLocaleDateString('en-CA'); }
+
+function recentStartDate(days = 15) {
+  const d = new Date();
+  d.setDate(d.getDate() - days);
+  return d.toLocaleDateString('en-CA');
+}
+
+function formatDate(s) {
+  return new Date(s + 'T12:00:00').toLocaleDateString('en-US', {
+    weekday: 'long', month: 'long', day: 'numeric', year: 'numeric'
+  });
+}
+
+function formatTime(iso) {
+  return new Date(iso).toLocaleTimeString('en-US', {
+    hour: 'numeric', minute: '2-digit', timeZoneName: 'short'
+  });
+}
+
+async function fetchJSON(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+function setStage(msg) {
+  const el = document.getElementById('stage-msg');
+  if (el) el.textContent = msg;
+}
+
+// ─── MLB API ──────────────────────────────────────────────────────────────────
+
+async function getSchedule(date) {
+  const d = await fetchJSON(
+    `${API}/schedule?sportId=1&date=${date}&hydrate=probablePitcher,lineups,team`
+  );
+  return d.dates?.[0]?.games || [];
+}
+
+// Season stats + handedness in two parallel calls
+async function getPitcherInfo(id) {
+  try {
+    const [sd, pd] = await Promise.all([
+      fetchJSON(`${API}/people/${id}/stats?stats=season&season=${SEASON}&group=pitching`),
+      fetchJSON(`${API}/people/${id}`),
+    ]);
+    const s  = sd.stats?.[0]?.splits?.[0]?.stat || {};
+    const ip = parseFloat(s.inningsPitched || '0');
+    return {
+      hand: pd.people?.[0]?.pitchHand?.code || 'R',
+      obaa: parseFloat(s.avg   || String(LEAGUE.ba)),
+      era:  parseFloat(s.era   || String(LEAGUE.era)),
+      whip: parseFloat(s.whip  || String(LEAGUE.whip)),
+      k9:   ip > 0 ? (parseInt(s.strikeOuts || '0') / ip * 9) : LEAGUE.k9,
+      ip,
+    };
+  } catch {
+    return { hand: 'R', obaa: LEAGUE.ba, era: LEAGUE.era, whip: LEAGUE.whip, k9: LEAGUE.k9, ip: 0 };
+  }
+}
+
+// Last 5 game-log entries → recent ERA
+async function getPitcherRecent(id) {
+  try {
+    const d = await fetchJSON(
+      `${API}/people/${id}/stats?stats=gameLog&season=${SEASON}&group=pitching`
+    );
+    const entries = (d.stats?.[0]?.splits || []).slice(-5);
+    if (!entries.length) return null;
+    let er = 0, ip = 0;
+    for (const e of entries) {
+      er += parseFloat(e.stat?.earnedRuns    || '0');
+      ip += parseFloat(e.stat?.inningsPitched || '0');
+    }
+    return ip > 0 ? ip / 9 * er / ip * 9 : null; // just er/ip*9 = recentERA
+    // simpler:
+  } catch { return null; }
+}
+
+// Season hitting stats
+async function getBatterStats(id) {
+  try {
+    const d = await fetchJSON(
+      `${API}/people/${id}/stats?stats=season&season=${SEASON}&group=hitting`
+    );
+    const s = d.stats?.[0]?.splits?.[0]?.stat;
+    if (!s) return null;
+    const ab = parseInt(s.atBats          || '0', 10);
+    const pa = parseInt(s.plateAppearances || s.atBats || '0', 10);
+    const so = parseInt(s.strikeOuts       || '0', 10);
+    return {
+      avg:  parseFloat(s.avg || '0'),
+      ops:  parseFloat(s.ops || '0'),
+      obp:  parseFloat(s.obp || '0'),
+      slg:  parseFloat(s.slg || '0'),
+      ab,
+      kPct: pa > 0 ? so / pa : LEAGUE.kPct,
+    };
+  } catch { return null; }
+}
+
+// Last-15-day batting average
+async function getBatterRecent(id, startDate, endDate) {
+  try {
+    const d = await fetchJSON(
+      `${API}/people/${id}/stats?stats=byDateRange&season=${SEASON}&group=hitting` +
+      `&startDate=${startDate}&endDate=${endDate}`
+    );
+    const s = d.stats?.[0]?.splits?.[0]?.stat;
+    if (!s || parseInt(s.atBats || '0') < 10) return null;
+    return parseFloat(s.avg || '0');
+  } catch { return null; }
+}
+
+// Wind at venue (requires WEATHER_KEY)
+async function getWind(homeTeamId) {
+  if (!WEATHER_KEY) return null;
+  const st = STADIUM[homeTeamId];
+  if (!st?.open) return null;
+  try {
+    const d = await fetchJSON(
+      `https://api.openweathermap.org/data/2.5/weather` +
+      `?lat=${st.lat}&lon=${st.lon}&appid=${WEATHER_KEY}&units=imperial`
+    );
+    return { speed: d.wind?.speed || 0, deg: d.wind?.deg ?? null, cf: st.cf };
+  } catch { return null; }
+}
+
+// Wind→hit multiplier: alignment between wind direction and CF bearing
+// OpenWeatherMap deg = direction wind comes FROM; we want where it's going.
+function windFactor(wind) {
+  if (!wind || wind.speed < 8 || wind.deg == null) return 1.0;
+  const toward = (wind.deg + 180) % 360;
+  let diff = Math.abs(toward - wind.cf);
+  if (diff > 180) diff = 360 - diff;
+  const alignment = Math.cos((diff * Math.PI) / 180); // 1=blowing out, -1=blowing in
+  const effect = alignment * clamp(wind.speed / 25, 0, 1) * 0.06;
+  return 1 + effect; // up to ±6%
+}
+
+// ─── Scoring ──────────────────────────────────────────────────────────────────
+//
+// P(hit per PA) = batterBase × pitcherWeakness × platoon × park × wind
+// P(≥1 hit)    = 1 − (1 − pHit)^expectedPAs
+//
+// batterBase = season_BA × opsAdj × recentAdj × contactAdj
+//
+// pitcherWeakness (>1 = easier than league avg):
+//   oBAA × 0.30 + ERA × 0.20 + WHIP × 0.20 + K9(inv) × 0.15 + recentERA × 0.15
+
+function expectedPAs(lineupPos) {
+  // 1-indexed batting order position
+  const table = [4.7, 4.5, 4.3, 4.1, 4.0, 3.9, 3.8, 3.6, 3.5];
+  return table[clamp(lineupPos - 1, 0, 8)];
+}
+
+function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind) {
+  const { hand: pitcherHand, obaa, era, whip, k9, recentERA } = pitcher;
+
+  const platoonKey  = `${batterHand}v${pitcherHand}`;
+  const platoon     = PLATOON[platoonKey] ?? 1.0;
+
+  // Batter factors
+  const opsAdj = clamp(
+    1 + 0.12 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
+    0.85, 1.18
+  );
+  const recentAdj = batter.recentAvg != null
+    ? clamp(1 + 0.35 * (batter.recentAvg - batter.avg) / Math.max(batter.avg, 0.05), 0.65, 1.45)
+    : 1.0;
+  const contactAdj = clamp(
+    (1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct),
+    0.80, 1.20
+  );
+
+  const batterBase = batter.avg * opsAdj * recentAdj * contactAdj;
+
+  // Pitcher weakness relative to league (each ratio > 1 = easier to hit)
+  const recentERAVal = recentERA ?? era;
+  const pitcherWeakness = clamp(
+    (obaa          / LEAGUE.ba)   * 0.30 +
+    (era           / LEAGUE.era)  * 0.20 +
+    (whip          / LEAGUE.whip) * 0.20 +
+    (LEAGUE.k9     / Math.max(k9, 1)) * 0.15 +
+    (recentERAVal  / LEAGUE.era)  * 0.15,
+    0.40, 2.20
+  );
+
+  const wf    = windFactor(wind);
+  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkFactor * wf, 0.05, 0.65);
+  const ePAs  = expectedPAs(lineupPos);
+
+  return {
+    prob: 1 - Math.pow(1 - pHit, ePAs),
+    pHit, platoon, pitcherWeakness, parkFactor, wf,
+    opsAdj, recentAdj, contactAdj, ePAs,
+    batterHand, pitcherHand,
+  };
+}
+
+// ─── Rendering ────────────────────────────────────────────────────────────────
+
+function fmtAvg(n) {
+  if (!n || isNaN(n) || n === 0) return '.---';
+  return n.toFixed(3).replace(/^0/, '');
+}
+
+function fmtNum(n, dec = 2) {
+  if (!n || isNaN(n)) return '—';
+  return n.toFixed(dec);
+}
+
+function fcls(v, goodAbove1 = true) {
+  const d = v - 1;
+  if (Math.abs(d) < 0.025) return 'neutral';
+  return (goodAbove1 ? d > 0 : d < 0) ? 'good' : 'bad';
+}
+
+function farrow(v, goodAbove1 = true) {
+  const d = v - 1;
+  if (Math.abs(d) < 0.025) return '→ Neutral';
+  const pct = Math.round(Math.abs(d) * 100);
+  const dir  = (goodAbove1 ? d > 0 : d < 0) ? '▲' : '▼';
+  return `${dir} ${pct}%`;
+}
+
+function platoonLabel(b, p) {
+  const bat = b === 'S' ? 'Switch' : b === 'L' ? 'Left' : 'Right';
+  const pit = p === 'L' ? 'LHP' : 'RHP';
+  return `${bat}-handed vs ${pit}`;
+}
+
+function windDesc(wf, wind) {
+  if (!wind || wind.speed < 8) return null;
+  const dir  = ['N','NE','E','SE','S','SW','W','NW'][Math.round(wind.deg / 45) % 8];
+  const mph  = Math.round(wind.speed);
+  const effect = wf > 1.02 ? 'blowing out' : wf < 0.98 ? 'blowing in' : 'crosswind';
+  return `${mph} mph ${dir} — ${effect}`;
+}
+
+function renderCard(pick, rank) {
+  const medals = ['🥇 Pick #1','🥈 Pick #2','🥉 Pick #3','4️⃣ Pick #4','5️⃣ Pick #5','6️⃣ Pick #6'];
+  const pct    = Math.round(pick.prob * 100);
+
+  const parkInfo = PARK[pick.homeTeamId];
+  const parkName = parkInfo?.name ?? pick.venue;
+  const parkLabel = pick.parkFactor >= 1.03 ? 'hitter-friendly'
+                  : pick.parkFactor <= 0.96 ? 'pitcher-friendly'
+                  : 'neutral park';
+
+  // Pitcher weakness expressed as readable ERA/WHIP string
+  const pERA  = fmtNum(pick.pitcher.era, 2);
+  const pWHIP = fmtNum(pick.pitcher.whip, 2);
+  const pK9   = fmtNum(pick.pitcher.k9,  1);
+  const pwCls = fcls(pick.pitcherWeakness);
+
+  // Recent form
+  const hasRecent = pick.batter.recentAvg != null;
+  const recentCls  = hasRecent ? fcls(pick.recentAdj) : 'neutral';
+  const recentText = hasRecent
+    ? `${fmtAvg(pick.batter.recentAvg)} last 15d ${farrow(pick.recentAdj)}`
+    : 'no recent data';
+
+  // Wind
+  const wDesc = windDesc(pick.wf, pick.wind);
+  const wCls  = pick.wf > 1.02 ? 'good' : pick.wf < 0.98 ? 'bad' : 'neutral';
+
+  return `
+<div class="card rank-${rank}">
+  <div class="rank-label">${medals[rank]}</div>
+  <div class="batter-name">${pick.batterName}</div>
+  <div class="batter-team">${pick.batterTeam}</div>
+
+  <div class="prob-row">
+    <div class="prob-pct">${pct}%</div>
+    <div class="prob-label">chance of<br>≥1 hit</div>
+  </div>
+
+  <div class="matchup-line">vs ${pick.pitcherName} (${pick.pitcherHand === 'L' ? 'LHP' : 'RHP'})</div>
+  <div class="game-time">${pick.gameTime} · ${pick.venue}</div>
+
+  <div class="stat-group-label">Batter</div>
+  <div class="stats-row">
+    <div class="stat">
+      <div class="stat-value">${fmtAvg(pick.batter.avg)}</div>
+      <div class="stat-label">Season BA</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">${fmtNum(pick.batter.ops, 3).replace(/^0/,'')}</div>
+      <div class="stat-label">OPS</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">${hasRecent ? fmtAvg(pick.batter.recentAvg) : '—'}</div>
+      <div class="stat-label">15-Day BA</div>
+    </div>
+  </div>
+
+  <div class="stat-group-label">Pitcher vs batters</div>
+  <div class="stats-row">
+    <div class="stat">
+      <div class="stat-value">${fmtAvg(pick.pitcher.obaa)}</div>
+      <div class="stat-label">oBAA</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">${pERA}</div>
+      <div class="stat-label">ERA</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">${pWHIP}</div>
+      <div class="stat-label">WHIP</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">${pK9}</div>
+      <div class="stat-label">K/9</div>
+    </div>
+  </div>
+
+  <div class="factors">
+    <div class="factor">
+      <span class="factor-name">${platoonLabel(pick.batterHand, pick.pitcherHand)}</span>
+      <span class="factor-val ${fcls(pick.platoon)}">${farrow(pick.platoon)}</span>
+    </div>
+    <div class="factor">
+      <span class="factor-name">Pitcher weakness</span>
+      <span class="factor-val ${pwCls}">${pwCls === 'good' ? 'Hittable' : pwCls === 'bad' ? 'Tough' : 'Average'} ${farrow(pick.pitcherWeakness)}</span>
+    </div>
+    <div class="factor">
+      <span class="factor-name">Batter recent form</span>
+      <span class="factor-val ${recentCls}">${recentText}</span>
+    </div>
+    <div class="factor">
+      <span class="factor-name">Contact rate (K%: ${Math.round((pick.batter.kPct ?? LEAGUE.kPct) * 100)}%)</span>
+      <span class="factor-val ${fcls(pick.contactAdj)}">${farrow(pick.contactAdj)}</span>
+    </div>
+    <div class="factor">
+      <span class="factor-name">${parkName}</span>
+      <span class="factor-val ${fcls(pick.parkFactor)}">${parkLabel} ${farrow(pick.parkFactor)}</span>
+    </div>
+    <div class="factor">
+      <span class="factor-name">Lineup spot #${pick.lineupPos} (~${pick.ePAs.toFixed(1)} PAs)</span>
+      <span class="factor-val ${pick.lineupPos <= 3 ? 'good' : pick.lineupPos >= 7 ? 'neutral' : 'neutral'}">${pick.lineupPos <= 3 ? '▲ More PAs' : '→ Avg PAs'}</span>
+    </div>
+    ${wDesc ? `
+    <div class="factor">
+      <span class="factor-name">Wind</span>
+      <span class="factor-val ${wCls}">${wDesc}</span>
+    </div>` : ''}
+  </div>
+</div>`;
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+async function main() {
+  const date     = todayStr();
+  const startDate = recentStartDate(15);
+
+  document.getElementById('date-label').textContent = formatDate(date);
+
+  let games;
+  try {
+    games = await getSchedule(date);
+  } catch (e) {
+    show(`<div class="error-box">Failed to load schedule: ${e.message}</div>`);
+    return;
+  }
+
+  if (!games.length) {
+    show(`<div class="info-box"><strong>No Games Today</strong>No MLB games scheduled.</div>`);
+    return;
+  }
+
+  const gamesWithLineups = games.filter(g =>
+    g.lineups?.homePlayers?.length && g.lineups?.awayPlayers?.length
+  );
+
+  if (!gamesWithLineups.length) {
+    const probCount = games.filter(g =>
+      g.teams?.home?.probablePitcher || g.teams?.away?.probablePitcher
+    ).length;
+    show(`
+      <div class="info-box">
+        <strong>Lineups Not Yet Posted</strong>
+        ${games.length} game${games.length !== 1 ? 's' : ''} today,
+        ${probCount} with probable pitchers set.<br><br>
+        Lineups typically post 3–4 hours before first pitch.
+        <button class="refresh-btn" onclick="location.reload()">↻ Refresh</button>
+      </div>`);
+    return;
+  }
+
+  show(`<div class="loading"><div class="spinner"></div>Analyzing matchups…<div class="stage" id="stage-msg">Fetching pitcher stats…</div></div>`);
+
+  // ── Stage 1: pitcher info (season stats + hand) ────────────────────────────
+  const pitcherIds = new Set();
+  for (const g of gamesWithLineups) {
+    if (g.teams?.home?.probablePitcher?.id) pitcherIds.add(g.teams.home.probablePitcher.id);
+    if (g.teams?.away?.probablePitcher?.id) pitcherIds.add(g.teams.away.probablePitcher.id);
+  }
+
+  const pitcherInfo = {};
+  await Promise.all([...pitcherIds].map(async id => {
+    pitcherInfo[id] = await getPitcherInfo(id);
+  }));
+
+  // ── Stage 2: batter season stats ──────────────────────────────────────────
+  setStage('Fetching batter stats…');
+
+  const batterIds = new Set();
+  // Map batter id → lineup position (1-indexed) and hand
+  const batterMeta = {};
+
+  for (const g of gamesWithLineups) {
+    const sides = [
+      { players: g.lineups.awayPlayers, team: g.teams?.away?.team?.name ?? 'Away', pitcher: g.teams?.home?.probablePitcher },
+      { players: g.lineups.homePlayers, team: g.teams?.home?.team?.name ?? 'Home', pitcher: g.teams?.away?.probablePitcher },
+    ];
+    for (const { players, team, pitcher } of sides) {
+      players.forEach((p, idx) => {
+        batterIds.add(p.id);
+        batterMeta[p.id] = {
+          name: p.fullName,
+          team,
+          hand: p.batSide?.code ?? p.batSideCode ?? 'R',
+          lineupPos: idx + 1,
+          pitcher,
+          homeTeamId: g.teams?.home?.team?.id,
+          parkFactor: PARK[g.teams?.home?.team?.id]?.factor ?? 1.00,
+          venue: g.venue?.name ?? 'Unknown',
+          gameTime: formatTime(g.gameDate),
+        };
+      });
+    }
+  }
+
+  const batterSeasonStats = {};
+  const ids = [...batterIds];
+  const BATCH = 12;
+  for (let i = 0; i < ids.length; i += BATCH) {
+    setStage(`Fetching batter stats… ${Math.min(i + BATCH, ids.length)}/${ids.length}`);
+    await Promise.all(ids.slice(i, i + BATCH).map(async id => {
+      batterSeasonStats[id] = await getBatterStats(id);
+    }));
+  }
+
+  // ── Stage 3: initial scoring with season stats only ────────────────────────
+  setStage('Scoring…');
+
+  const candidates = [];
+
+  for (const id of ids) {
+    const bs   = batterSeasonStats[id];
+    const meta = batterMeta[id];
+    if (!bs || bs.ab < 40 || !meta.pitcher) continue;
+
+    const pitcher = pitcherInfo[meta.pitcher.id];
+    if (!pitcher) continue;
+
+    const s = score(
+      bs, pitcher, meta.parkFactor, meta.hand, meta.lineupPos, null
+    );
+
+    candidates.push({
+      batterId:    id,
+      batterName:  meta.name,
+      batterTeam:  meta.team,
+      pitcherName: meta.pitcher.fullName,
+      pitcherHand: pitcher.hand,
+      homeTeamId:  meta.homeTeamId,
+      parkFactor:  meta.parkFactor,
+      venue:       meta.venue,
+      gameTime:    meta.gameTime,
+      lineupPos:   meta.lineupPos,
+      batter:      { ...bs },
+      pitcher,
+      ...s,
+    });
+  }
+
+  candidates.sort((a, b) => b.prob - a.prob);
+  const top30 = candidates.slice(0, 30);
+
+  // ── Stage 4: recent form for top 30 batters ────────────────────────────────
+  setStage('Fetching recent form (top 30)…');
+
+  await Promise.all(top30.map(async pick => {
+    const recent = await getBatterRecent(pick.batterId, startDate, date);
+    pick.batter.recentAvg = recent;
+  }));
+
+  // ── Stage 5: pitcher recent form (unique pitchers in top 30) ───────────────
+  setStage('Fetching pitcher recent form…');
+
+  const top30PitcherIds = [...new Set(top30.map(p => p.pitcher))];
+  const pitcherRecent = new Map();
+  await Promise.all(
+    [...new Set(top30.map(p => batterMeta[p.batterId]?.pitcher?.id).filter(Boolean))].map(async pid => {
+      const d = await getPitcherRecentERA(pid);
+      pitcherRecent.set(pid, d);
+    })
+  );
+
+  // Inject recent ERA and re-score top 30
+  for (const pick of top30) {
+    const pid = batterMeta[pick.batterId]?.pitcher?.id;
+    if (pid && pitcherRecent.has(pid)) {
+      pick.pitcher.recentERA = pitcherRecent.get(pid);
+    }
+    const wind = null; // fetched per-venue below for final top 6
+    Object.assign(pick, score(
+      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, wind
+    ));
+  }
+
+  top30.sort((a, b) => b.prob - a.prob);
+  const top6 = top30.slice(0, 6);
+
+  if (!top6.length) {
+    show(`<div class="info-box"><strong>Not Enough Data</strong>Try again once player stats are available.</div>`);
+    return;
+  }
+
+  // ── Stage 6: wind for the 6 venues (if key set) ───────────────────────────
+  if (WEATHER_KEY) {
+    setStage('Fetching wind data…');
+    const venueIds = [...new Set(top6.map(p => p.homeTeamId))];
+    const windMap  = {};
+    await Promise.all(venueIds.map(async id => {
+      windMap[id] = await getWind(id);
+    }));
+    for (const pick of top6) {
+      pick.wind = windMap[pick.homeTeamId] ?? null;
+      Object.assign(pick, score(
+        pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, pick.wind
+      ));
+    }
+    top6.sort((a, b) => b.prob - a.prob);
+  } else {
+    top6.forEach(p => { p.wind = null; });
+  }
+
+  show(
+    top6.map((p, i) => renderCard(p, i)).join('') +
+    `<button class="refresh-btn" onclick="location.reload()">↻ Refresh</button>`
+  );
+}
+
+// Separate clean function to avoid the erroneous double-calculation above
+async function getPitcherRecentERA(id) {
+  try {
+    const d = await fetchJSON(
+      `${API}/people/${id}/stats?stats=gameLog&season=${SEASON}&group=pitching`
+    );
+    const entries = (d.stats?.[0]?.splits || []).slice(-5);
+    if (!entries.length) return null;
+    let er = 0, ip = 0;
+    for (const e of entries) {
+      er += parseFloat(e.stat?.earnedRuns     || '0');
+      ip += parseFloat(e.stat?.inningsPitched  || '0');
+    }
+    return ip > 0 ? (er / ip * 9) : null;
+  } catch { return null; }
+}
+
+function show(html) {
+  document.getElementById('app').innerHTML = html;
+}
+
+main().catch(e => show(
+  `<div class="error-box">Error: ${e.message}` +
+  `<button class="refresh-btn" onclick="location.reload()">↻ Retry</button></div>`
+));
+</script>
+</body>
+</html>
