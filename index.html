@@ -523,24 +523,6 @@ async function getPitcherInfo(id) {
   }
 }
 
-// Last 5 game-log entries → recent ERA
-async function getPitcherRecent(id) {
-  try {
-    const d = await fetchJSON(
-      `${API}/people/${id}/stats?stats=gameLog&season=${SEASON}&group=pitching`
-    );
-    const entries = (d.stats?.[0]?.splits || []).slice(-5);
-    if (!entries.length) return null;
-    let er = 0, ip = 0;
-    for (const e of entries) {
-      er += parseFloat(e.stat?.earnedRuns    || '0');
-      ip += parseFloat(e.stat?.inningsPitched || '0');
-    }
-    return ip > 0 ? ip / 9 * er / ip * 9 : null; // just er/ip*9 = recentERA
-    // simpler:
-  } catch { return null; }
-}
-
 // Season hitting stats
 async function getBatterStats(id) {
   try {
@@ -889,7 +871,7 @@ function renderBacktestResult(result) {
   return `
     <div><strong>${formatDate(result.date)}</strong></div>
     <div>${result.picks} batter-game picks across ${result.games} completed games.</div>
-    <div>Brier score: ${result.brier.toFixed(3)} Â· Overall hit rate: ${Math.round(result.hitRate * 100)}%</div>
+    <div>Brier score: ${result.brier.toFixed(3)} · Overall hit rate: ${Math.round(result.hitRate * 100)}%</div>
     <div style="margin-top:8px">${bucketRows}</div>`;
 }
 
@@ -1259,7 +1241,7 @@ async function main() {
   );
 }
 
-// Separate clean function to avoid the erroneous double-calculation above
+// Last 5 game-log entries, returned with innings for sample-size shrinkage.
 async function getPitcherRecentERA(id) {
   try {
     const d = await fetchJSON(
