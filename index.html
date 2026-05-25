@@ -67,7 +67,8 @@ h1 {
 .card.rank-2::before { background: linear-gradient(90deg, #cd7f32, #a0522d); }
 .card.rank-3::before,
 .card.rank-4::before,
-.card.rank-5::before { background: var(--border); }
+.card.rank-5::before,
+.card.rank-6::before { background: var(--border); }
 
 .rank-label {
   font-size: 0.7rem;
@@ -567,6 +568,12 @@ function formatTime(iso) {
   });
 }
 
+function isPlayableGame(g) {
+  const state = g.status?.abstractGameState;
+  const code = g.status?.statusCode;
+  return state === 'Preview' || state === 'Live' || code === 'S' || code === 'P' || code === 'I';
+}
+
 async function fetchJSON(url) {
   const r = await fetch(url, { cache: 'no-store' });
   if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -834,7 +841,7 @@ function windDesc(wf, wind) {
 }
 
 function renderCard(pick, rank) {
-  const medals = ['🥇 Pick #1','🥈 Pick #2','🥉 Pick #3','4️⃣ Pick #4','5️⃣ Pick #5','6️⃣ Pick #6'];
+  const medals = ['🥇 Pick #1','🥈 Pick #2','🥉 Pick #3','4️⃣ Pick #4','5️⃣ Pick #5','6️⃣ Pick #6','7️⃣ Pick #7'];
   const pct    = Math.round(pick.prob * 100);
   const rawPct = Math.round((pick.rawProb ?? pick.prob) * 100);
 
@@ -1408,17 +1415,20 @@ async function main() {
   }
 
   const gamesWithLineups = games.filter(g =>
-    g.lineups?.homePlayers?.length && g.lineups?.awayPlayers?.length
+    isPlayableGame(g) &&
+    g.lineups?.homePlayers?.length &&
+    g.lineups?.awayPlayers?.length
   );
 
   if (!gamesWithLineups.length) {
+    const playableCount = games.filter(isPlayableGame).length;
     const probCount = games.filter(g =>
       g.teams?.home?.probablePitcher || g.teams?.away?.probablePitcher
     ).length;
     show(`
       <div class="info-box">
         <strong>Lineups Not Yet Posted</strong>
-        ${games.length} game${games.length !== 1 ? 's' : ''} today,
+        ${playableCount} game${playableCount !== 1 ? 's' : ''} still upcoming or live,
         ${probCount} with probable pitchers set.<br><br>
         Lineups typically post 3–4 hours before first pitch.
         <button class="refresh-btn" onclick="location.reload()">↻ Refresh</button>
@@ -1565,39 +1575,39 @@ async function main() {
   }
 
   top30.sort((a, b) => b.prob - a.prob);
-  const top6 = top30.slice(0, 6);
+  const topPicks = top30.slice(0, 7);
 
-  if (!top6.length) {
-    show(`<div class="info-box"><strong>Not Enough Data</strong>Try again once player stats are available.</div>`);
+  if (!topPicks.length) {
+    show(`<div class="info-box"><strong>No More Actionable Picks</strong>Remaining games may be final, missing lineups, or missing enough player data.</div>`);
     return;
   }
 
   // ── Stage 6: wind for the 6 venues (if key set) ───────────────────────────
   if (WEATHER_KEY) {
     setStage('Fetching wind data…');
-    const venueIds = [...new Set(top6.map(p => p.homeTeamId))];
+    const venueIds = [...new Set(topPicks.map(p => p.homeTeamId))];
     const windMap  = {};
     await Promise.all(venueIds.map(async id => {
       windMap[id] = await getWind(id);
     }));
-    for (const pick of top6) {
+    for (const pick of topPicks) {
       pick.wind = windMap[pick.homeTeamId] ?? null;
       Object.assign(pick, score(
         pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, pick.wind
       ));
     }
-    top6.sort((a, b) => b.prob - a.prob);
+    topPicks.sort((a, b) => b.prob - a.prob);
   } else {
-    top6.forEach(p => { p.wind = null; });
+    topPicks.forEach(p => { p.wind = null; });
   }
 
   currentPickDate = date;
-  currentTopPicks = top6;
+  currentTopPicks = topPicks;
 
   show(
-    renderSummary(top6) +
+    renderSummary(topPicks) +
     renderPickTracker() +
-    top6.map((p, i) => renderCard(p, i)).join('') +
+    topPicks.map((p, i) => renderCard(p, i)).join('') +
     `<button class="refresh-btn" onclick="location.reload()">↻ Refresh</button>` +
     renderBacktestPanel()
   );
