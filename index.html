@@ -44,6 +44,30 @@ h1 {
 }
 
 .subtitle { font-size: 0.82rem; color: var(--muted); margin-top: 4px; }
+.tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.tab {
+  display: block;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--muted);
+  text-decoration: none;
+  padding: 9px 10px;
+  border-radius: 8px;
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.tab.active {
+  color: var(--text);
+  border-color: var(--blue);
+  background: var(--inset);
+}
 
 /* ---- Cards ---- */
 .card {
@@ -213,6 +237,16 @@ h1 {
   padding: 16px;
   color: var(--red);
   font-size: 0.85rem;
+}
+
+.status-alert {
+  background: #251a06;
+  border: 1px solid var(--yellow);
+  color: var(--yellow);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 8px 0;
+  font-size: 0.76rem;
 }
 
 .refresh-btn {
@@ -407,6 +441,10 @@ footer {
 <header>
   <h1>⚾ MLB Hit Picks</h1>
   <div class="subtitle" id="date-label">Loading…</div>
+  <nav class="tabs" aria-label="Pick type">
+    <a class="tab active" href="index.html">Hits</a>
+    <a class="tab" href="hr.html">Home Runs</a>
+  </nav>
 </header>
 
 <div id="app">
@@ -566,6 +604,11 @@ function formatTime(iso) {
   return new Date(iso).toLocaleTimeString('en-US', {
     hour: 'numeric', minute: '2-digit', timeZoneName: 'short'
   });
+}
+
+function gameStatusNote(g) {
+  const text = g.status?.detailedState || g.status?.reason || '';
+  return /delay|rain|postpone/i.test(text) ? text : '';
 }
 
 function isPlayableGame(g) {
@@ -882,6 +925,7 @@ function renderCard(pick, rank) {
 
   <div class="matchup-line">vs ${pick.pitcherName} (${pick.pitcherHand === 'L' ? 'lefty pitcher' : 'righty pitcher'})</div>
   <div class="game-time">${pick.gameTime} · ${pick.venue}</div>
+  ${pick.statusNote ? `<div class="status-alert">${pick.statusNote}</div>` : ''}
 
   <div class="stat-group-label">Hitter</div>
   <div class="stats-row">
@@ -1478,6 +1522,7 @@ async function main() {
           parkFactor: PARK[g.teams?.home?.team?.id]?.factor ?? 1.00,
           venue: g.venue?.name ?? 'Unknown',
           gameTime: formatTime(g.gameDate),
+          statusNote: gameStatusNote(g),
         });
       });
     }
@@ -1526,6 +1571,7 @@ async function main() {
       parkFactor:  meta.parkFactor,
       venue:       meta.venue,
       gameTime:    meta.gameTime,
+      statusNote:  meta.statusNote,
       lineupPos:   meta.lineupPos,
       batter:      { ...bs },
       pitcher,
