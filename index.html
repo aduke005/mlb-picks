@@ -227,6 +227,71 @@ h1 {
   font-family: inherit;
 }
 
+.inline-note {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: -2px;
+}
+
+.backtest {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+  margin: 14px 0;
+}
+
+.backtest-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
+.backtest-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.backtest input {
+  flex: 1;
+  min-width: 0;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  padding: 9px 10px;
+}
+
+.backtest button {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--blue);
+  padding: 9px 12px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.backtest-output {
+  margin-top: 10px;
+  font-size: 0.76rem;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.bucket-row {
+  display: grid;
+  grid-template-columns: 64px 1fr 64px;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid var(--border);
+}
+
+.bucket-row:first-child { border-top: 0; }
+
 footer {
   text-align: center;
   padding: 24px 0 8px;
@@ -250,7 +315,7 @@ footer {
 </div>
 
 <footer>
-  Data: MLB Stats API · BA · OPS · K% · platoon · ERA · WHIP · K/9 · recent form · park · lineup spot<br>
+  Data: MLB Stats API · H/PA · OPS · K% · platoon · oBAA · WHIP · K/9 · recent form · park · lineup spot<br>
   Refresh after lineups post (~3–4 hrs before first pitch)
 </footer>
 
@@ -268,11 +333,21 @@ const SEASON = new Date().getFullYear();
 // League-average baselines for normalization
 const LEAGUE = {
   ba:   0.248,
+  hPerPa: 0.223,
   ops:  0.720,
   era:  4.30,
   whip: 1.25,
   k9:   9.0,
   kPct: 0.228,  // batter strikeout %
+};
+
+const MODEL = {
+  batterPaPrior: 260,
+  pitcherIpPrior: 70,
+  recentAbPrior: 45,
+  minBatterPa: 45,
+  maxPerPaHit: 0.48,
+  calibrationDamp: 0.68,
 };
 
 // Park hit factors by home-team ID (FanGraphs 3-yr regressed hits, 2024)
@@ -355,11 +430,22 @@ const STADIUM = {
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+function shrink(value, baseline, sample, prior) {
+  const n = Math.max(0, Number(sample) || 0);
+  return ((value * n) + (baseline * prior)) / (n + prior);
+}
+
 function todayStr() { return new Date().toLocaleDateString('en-CA'); }
 
 function recentStartDate(days = 15) {
   const d = new Date();
   d.setDate(d.getDate() - days);
+  return d.toLocaleDateString('en-CA');
+}
+
+function addDays(dateStr, days) {
+  const d = new Date(dateStr + 'T12:00:00');
+  d.setDate(d.getDate() + days);
   return d.toLocaleDateString('en-CA');
 }
 
@@ -395,17 +481,37 @@ async function getSchedule(date) {
   return d.dates?.[0]?.games || [];
 }
 
+const personCache = new Map();
+
+async function getPersonInfo(id) {
+  if (personCache.has(id)) return personCache.get(id);
+  try {
+    const d = await fetchJSON(`${API}/people/${id}`);
+    const p = d.people?.[0] || {};
+    const info = {
+      batSide: p.batSide?.code || null,
+      pitchHand: p.pitchHand?.code || null,
+    };
+    personCache.set(id, info);
+    return info;
+  } catch {
+    const info = { batSide: null, pitchHand: null };
+    personCache.set(id, info);
+    return info;
+  }
+}
+
 // Season stats + handedness in two parallel calls
 async function getPitcherInfo(id) {
   try {
     const [sd, pd] = await Promise.all([
       fetchJSON(`${API}/people/${id}/stats?stats=season&season=${SEASON}&group=pitching`),
-      fetchJSON(`${API}/people/${id}`),
+      getPersonInfo(id),
     ]);
     const s  = sd.stats?.[0]?.splits?.[0]?.stat || {};
     const ip = parseFloat(s.inningsPitched || '0');
     return {
-      hand: pd.people?.[0]?.pitchHand?.code || 'R',
+      hand: pd.pitchHand || 'R',
       obaa: parseFloat(s.avg   || String(LEAGUE.ba)),
       era:  parseFloat(s.era   || String(LEAGUE.era)),
       whip: parseFloat(s.whip  || String(LEAGUE.whip)),
@@ -445,6 +551,7 @@ async function getBatterStats(id) {
     if (!s) return null;
     const ab = parseInt(s.atBats          || '0', 10);
     const pa = parseInt(s.plateAppearances || s.atBats || '0', 10);
+    const h  = parseInt(s.hits            || '0', 10);
     const so = parseInt(s.strikeOuts       || '0', 10);
     return {
       avg:  parseFloat(s.avg || '0'),
@@ -452,12 +559,20 @@ async function getBatterStats(id) {
       obp:  parseFloat(s.obp || '0'),
       slg:  parseFloat(s.slg || '0'),
       ab,
+      pa,
+      hits: h,
+      hPerPa: pa > 0 ? h / pa : LEAGUE.hPerPa,
       kPct: pa > 0 ? so / pa : LEAGUE.kPct,
     };
   } catch { return null; }
 }
 
-// Last-15-day batting average
+async function getBatterHand(id) {
+  const info = await getPersonInfo(id);
+  return info.batSide || 'R';
+}
+
+// Last-15-day hitting sample
 async function getBatterRecent(id, startDate, endDate) {
   try {
     const d = await fetchJSON(
@@ -465,8 +580,17 @@ async function getBatterRecent(id, startDate, endDate) {
       `&startDate=${startDate}&endDate=${endDate}`
     );
     const s = d.stats?.[0]?.splits?.[0]?.stat;
-    if (!s || parseInt(s.atBats || '0') < 10) return null;
-    return parseFloat(s.avg || '0');
+    if (!s) return null;
+    const ab = parseInt(s.atBats || '0', 10);
+    const pa = parseInt(s.plateAppearances || s.atBats || '0', 10);
+    const h  = parseInt(s.hits || '0', 10);
+    if (ab < 8 || pa <= 0) return null;
+    return {
+      avg: parseFloat(s.avg || '0'),
+      ab,
+      pa,
+      hPerPa: h / pa,
+    };
   } catch { return null; }
 }
 
@@ -512,6 +636,15 @@ function expectedPAs(lineupPos) {
   return table[clamp(lineupPos - 1, 0, 8)];
 }
 
+function calibrateProbability(rawProb, ePAs) {
+  const leagueProb = 1 - Math.pow(1 - LEAGUE.hPerPa, ePAs);
+  return clamp(
+    leagueProb + ((rawProb - leagueProb) * MODEL.calibrationDamp),
+    0.28,
+    0.88
+  );
+}
+
 function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind) {
   const { hand: pitcherHand, obaa, era, whip, k9, recentERA } = pitcher;
 
@@ -519,38 +652,54 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind) {
   const platoon     = PLATOON[platoonKey] ?? 1.0;
 
   // Batter factors
+  const seasonHPerPa = shrink(
+    batter.hPerPa || LEAGUE.hPerPa,
+    LEAGUE.hPerPa,
+    batter.pa || batter.ab || 0,
+    MODEL.batterPaPrior
+  );
   const opsAdj = clamp(
-    1 + 0.12 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
+    1 + 0.08 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
     0.85, 1.18
   );
-  const recentAdj = batter.recentAvg != null
-    ? clamp(1 + 0.35 * (batter.recentAvg - batter.avg) / Math.max(batter.avg, 0.05), 0.65, 1.45)
+  const recentRate = batter.recentHPerPa != null
+    ? shrink(batter.recentHPerPa, seasonHPerPa, batter.recentPa || 0, MODEL.recentAbPrior)
+    : null;
+  const recentAdj = recentRate != null
+    ? clamp(1 + 0.18 * (recentRate - seasonHPerPa) / Math.max(seasonHPerPa, 0.05), 0.88, 1.12)
     : 1.0;
   const contactAdj = clamp(
     (1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct),
-    0.80, 1.20
+    0.88, 1.12
   );
 
-  const batterBase = batter.avg * opsAdj * recentAdj * contactAdj;
+  const batterBase = seasonHPerPa * opsAdj * recentAdj * contactAdj;
 
   // Pitcher weakness relative to league (each ratio > 1 = easier to hit)
-  const recentERAVal = recentERA ?? era;
+  const recentERAVal = recentERA != null
+    ? shrink(recentERA, era || LEAGUE.era, pitcher.recentIp || 0, 18)
+    : era;
+  const rawPitcherWeakness = clamp(
+    (obaa          / LEAGUE.ba)   * 0.40 +
+    (LEAGUE.k9     / Math.max(k9, 1)) * 0.25 +
+    (whip          / LEAGUE.whip) * 0.14 +
+    (era           / LEAGUE.era)  * 0.11 +
+    (recentERAVal  / LEAGUE.era)  * 0.10,
+    0.65, 1.55
+  );
   const pitcherWeakness = clamp(
-    (obaa          / LEAGUE.ba)   * 0.30 +
-    (era           / LEAGUE.era)  * 0.20 +
-    (whip          / LEAGUE.whip) * 0.20 +
-    (LEAGUE.k9     / Math.max(k9, 1)) * 0.15 +
-    (recentERAVal  / LEAGUE.era)  * 0.15,
-    0.40, 2.20
+    shrink(rawPitcherWeakness, 1.0, pitcher.ip || 0, MODEL.pitcherIpPrior),
+    0.78, 1.35
   );
 
   const wf    = windFactor(wind);
-  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkFactor * wf, 0.05, 0.65);
+  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkFactor * wf, 0.04, MODEL.maxPerPaHit);
   const ePAs  = expectedPAs(lineupPos);
+  const rawProb = 1 - Math.pow(1 - pHit, ePAs);
+  const prob = calibrateProbability(rawProb, ePAs);
 
   return {
-    prob: 1 - Math.pow(1 - pHit, ePAs),
-    pHit, platoon, pitcherWeakness, parkFactor, wf,
+    prob, rawProb, pHit, seasonHPerPa, platoon, pitcherWeakness, parkFactor, wf,
     opsAdj, recentAdj, contactAdj, ePAs,
     batterHand, pitcherHand,
   };
@@ -599,6 +748,7 @@ function windDesc(wf, wind) {
 function renderCard(pick, rank) {
   const medals = ['🥇 Pick #1','🥈 Pick #2','🥉 Pick #3','4️⃣ Pick #4','5️⃣ Pick #5','6️⃣ Pick #6'];
   const pct    = Math.round(pick.prob * 100);
+  const rawPct = Math.round((pick.rawProb ?? pick.prob) * 100);
 
   const parkInfo = PARK[pick.homeTeamId];
   const parkName = parkInfo?.name ?? pick.venue;
@@ -616,7 +766,7 @@ function renderCard(pick, rank) {
   const hasRecent = pick.batter.recentAvg != null;
   const recentCls  = hasRecent ? fcls(pick.recentAdj) : 'neutral';
   const recentText = hasRecent
-    ? `${fmtAvg(pick.batter.recentAvg)} last 15d ${farrow(pick.recentAdj)}`
+    ? `${fmtAvg(pick.batter.recentAvg)} last 15d (${pick.batter.recentAb} AB) ${farrow(pick.recentAdj)}`
     : 'no recent data';
 
   // Wind
@@ -631,8 +781,9 @@ function renderCard(pick, rank) {
 
   <div class="prob-row">
     <div class="prob-pct">${pct}%</div>
-    <div class="prob-label">chance of<br>≥1 hit</div>
+    <div class="prob-label">calibrated<br>chance of 1+ hit</div>
   </div>
+  <div class="inline-note">Raw model: ${rawPct}% · per-PA hit rate: ${Math.round(pick.pHit * 100)}%</div>
 
   <div class="matchup-line">vs ${pick.pitcherName} (${pick.pitcherHand === 'L' ? 'LHP' : 'RHP'})</div>
   <div class="game-time">${pick.gameTime} · ${pick.venue}</div>
@@ -642,6 +793,10 @@ function renderCard(pick, rank) {
     <div class="stat">
       <div class="stat-value">${fmtAvg(pick.batter.avg)}</div>
       <div class="stat-label">Season BA</div>
+    </div>
+    <div class="stat">
+      <div class="stat-value">${fmtAvg(pick.seasonHPerPa)}</div>
+      <div class="stat-label">Shrunk H/PA</div>
     </div>
     <div class="stat">
       <div class="stat-value">${fmtNum(pick.batter.ops, 3).replace(/^0/,'')}</div>
@@ -709,6 +864,195 @@ function renderCard(pick, rank) {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
+function renderBacktestPanel(defaultDate = addDays(todayStr(), -1)) {
+  return `
+<div class="backtest">
+  <div class="backtest-title">Calibration Backtest</div>
+  <div class="backtest-controls">
+    <input type="date" id="backtest-date" value="${defaultDate}">
+    <button onclick="runBacktest()">Run</button>
+  </div>
+  <div class="backtest-output" id="backtest-output">
+    Scores completed games for one prior date and compares prediction buckets to boxscores.
+  </div>
+</div>`;
+}
+
+function renderBacktestResult(result) {
+  const bucketRows = result.buckets.map(b => `
+    <div class="bucket-row">
+      <span>${b.label}</span>
+      <span>${b.count ? `${Math.round(b.hitRate * 100)}% hit rate` : 'no picks'}</span>
+      <span>${b.count} picks</span>
+    </div>`).join('');
+
+  return `
+    <div><strong>${formatDate(result.date)}</strong></div>
+    <div>${result.picks} batter-game picks across ${result.games} completed games.</div>
+    <div>Brier score: ${result.brier.toFixed(3)} Â· Overall hit rate: ${Math.round(result.hitRate * 100)}%</div>
+    <div style="margin-top:8px">${bucketRows}</div>`;
+}
+
+function bucketFor(prob) {
+  if (prob < 0.50) return '<50%';
+  if (prob < 0.60) return '50-59%';
+  if (prob < 0.70) return '60-69%';
+  if (prob < 0.80) return '70-79%';
+  return '80%+';
+}
+
+async function getBoxscore(gamePk) {
+  return fetchJSON(`${API}/game/${gamePk}/boxscore`);
+}
+
+async function getBatterStatsThroughDate(id, endDate) {
+  try {
+    const season = new Date(endDate + 'T12:00:00').getFullYear();
+    const d = await fetchJSON(
+      `${API}/people/${id}/stats?stats=byDateRange&season=${season}&group=hitting` +
+      `&startDate=${season}-03-01&endDate=${endDate}`
+    );
+    const s = d.stats?.[0]?.splits?.[0]?.stat;
+    if (!s) return null;
+    const ab = parseInt(s.atBats || '0', 10);
+    const pa = parseInt(s.plateAppearances || s.atBats || '0', 10);
+    const h  = parseInt(s.hits || '0', 10);
+    const so = parseInt(s.strikeOuts || '0', 10);
+    return {
+      avg: parseFloat(s.avg || '0'),
+      ops: parseFloat(s.ops || '0'),
+      obp: parseFloat(s.obp || '0'),
+      slg: parseFloat(s.slg || '0'),
+      ab, pa, hits: h,
+      hPerPa: pa > 0 ? h / pa : LEAGUE.hPerPa,
+      kPct: pa > 0 ? so / pa : LEAGUE.kPct,
+    };
+  } catch { return null; }
+}
+
+async function getPitcherInfoThroughDate(id, endDate) {
+  try {
+    const season = new Date(endDate + 'T12:00:00').getFullYear();
+    const [sd, pd] = await Promise.all([
+      fetchJSON(`${API}/people/${id}/stats?stats=byDateRange&season=${season}&group=pitching&startDate=${season}-03-01&endDate=${endDate}`),
+      getPersonInfo(id),
+    ]);
+    const s  = sd.stats?.[0]?.splits?.[0]?.stat || {};
+    const ip = parseFloat(s.inningsPitched || '0');
+    return {
+      hand: pd.pitchHand || 'R',
+      obaa: parseFloat(s.avg || String(LEAGUE.ba)),
+      era: parseFloat(s.era || String(LEAGUE.era)),
+      whip: parseFloat(s.whip || String(LEAGUE.whip)),
+      k9: ip > 0 ? (parseInt(s.strikeOuts || '0', 10) / ip * 9) : LEAGUE.k9,
+      ip,
+    };
+  } catch {
+    return getPitcherInfo(id);
+  }
+}
+
+async function runBacktest() {
+  const input = document.getElementById('backtest-date');
+  const out = document.getElementById('backtest-output');
+  const date = input?.value || addDays(todayStr(), -1);
+  const priorDate = addDays(date, -1);
+  out.textContent = 'Running backtest...';
+
+  try {
+    const games = (await getSchedule(date)).filter(g =>
+      g.status?.statusCode === 'F' &&
+      g.lineups?.homePlayers?.length &&
+      g.lineups?.awayPlayers?.length
+    );
+    const pitcherIds = new Set();
+    const batterIds = new Set();
+    const entries = [];
+
+    for (const g of games) {
+      if (g.teams?.home?.probablePitcher?.id) pitcherIds.add(g.teams.home.probablePitcher.id);
+      if (g.teams?.away?.probablePitcher?.id) pitcherIds.add(g.teams.away.probablePitcher.id);
+      const sides = [
+        { side: 'away', players: g.lineups.awayPlayers, pitcher: g.teams?.home?.probablePitcher },
+        { side: 'home', players: g.lineups.homePlayers, pitcher: g.teams?.away?.probablePitcher },
+      ];
+      for (const side of sides) {
+        side.players.forEach((p, idx) => {
+          batterIds.add(p.id);
+          entries.push({
+            gamePk: g.gamePk,
+            side: side.side,
+            id: p.id,
+            lineupPos: idx + 1,
+            pitcher: side.pitcher,
+            parkFactor: PARK[g.teams?.home?.team?.id]?.factor ?? 1.00,
+          });
+        });
+      }
+    }
+
+    const pitchers = {};
+    await Promise.all([...pitcherIds].map(async id => {
+      pitchers[id] = await getPitcherInfoThroughDate(id, priorDate);
+    }));
+
+    const batters = {};
+    const hands = {};
+    await Promise.all([...batterIds].map(async id => {
+      const [stats, hand] = await Promise.all([getBatterStatsThroughDate(id, priorDate), getBatterHand(id)]);
+      batters[id] = stats;
+      hands[id] = hand;
+    }));
+
+    const boxscores = new Map();
+    await Promise.all(games.map(async g => {
+      boxscores.set(g.gamePk, await getBoxscore(g.gamePk));
+    }));
+
+    const buckets = ['<50%', '50-59%', '60-69%', '70-79%', '80%+']
+      .map(label => ({ label, count: 0, hits: 0, brier: 0, hitRate: 0 }));
+    const bucketMap = new Map(buckets.map(b => [b.label, b]));
+    let picks = 0, hits = 0, brier = 0;
+
+    for (const e of entries) {
+      const batter = batters[e.id];
+      const pitcher = pitchers[e.pitcher?.id];
+      if (!batter || batter.pa < MODEL.minBatterPa || !pitcher) continue;
+      const s = score(batter, pitcher, e.parkFactor, hands[e.id] || 'R', e.lineupPos, null);
+      const boxPlayer = Object.values(boxscores.get(e.gamePk)?.teams?.[e.side]?.players || {})
+        .find(p => p.person?.id === e.id);
+      if (!boxPlayer?.stats?.batting) continue;
+      const actual = (boxPlayer?.stats?.batting?.hits || 0) > 0 ? 1 : 0;
+      const err = Math.pow(s.prob - actual, 2);
+      picks += 1;
+      hits += actual;
+      brier += err;
+      const bucket = bucketMap.get(bucketFor(s.prob));
+      bucket.count += 1;
+      bucket.hits += actual;
+      bucket.brier += err;
+    }
+
+    for (const b of buckets) {
+      b.hitRate = b.count ? b.hits / b.count : 0;
+      b.brier = b.count ? b.brier / b.count : 0;
+    }
+
+    out.innerHTML = renderBacktestResult({
+      date,
+      games: games.length,
+      picks,
+      hitRate: picks ? hits / picks : 0,
+      brier: picks ? brier / picks : 0,
+      buckets,
+    });
+  } catch (e) {
+    out.innerHTML = `<span class="bad">Backtest failed: ${e.message}</span>`;
+  }
+}
+
+window.runBacktest = runBacktest;
+
 async function main() {
   const date     = todayStr();
   const startDate = recentStartDate(15);
@@ -766,7 +1110,7 @@ async function main() {
 
   const batterIds = new Set();
   // Map batter id → lineup position (1-indexed) and hand
-  const batterMeta = {};
+  const lineupEntries = [];
 
   for (const g of gamesWithLineups) {
     const sides = [
@@ -776,28 +1120,32 @@ async function main() {
     for (const { players, team, pitcher } of sides) {
       players.forEach((p, idx) => {
         batterIds.add(p.id);
-        batterMeta[p.id] = {
+        lineupEntries.push({
+          key: `${g.gamePk}-${p.id}-${idx}`,
+          id: p.id,
           name: p.fullName,
           team,
-          hand: p.batSide?.code ?? p.batSideCode ?? 'R',
           lineupPos: idx + 1,
           pitcher,
           homeTeamId: g.teams?.home?.team?.id,
           parkFactor: PARK[g.teams?.home?.team?.id]?.factor ?? 1.00,
           venue: g.venue?.name ?? 'Unknown',
           gameTime: formatTime(g.gameDate),
-        };
+        });
       });
     }
   }
 
   const batterSeasonStats = {};
+  const batterHands = {};
   const ids = [...batterIds];
   const BATCH = 12;
   for (let i = 0; i < ids.length; i += BATCH) {
     setStage(`Fetching batter stats… ${Math.min(i + BATCH, ids.length)}/${ids.length}`);
     await Promise.all(ids.slice(i, i + BATCH).map(async id => {
-      batterSeasonStats[id] = await getBatterStats(id);
+      const [stats, hand] = await Promise.all([getBatterStats(id), getBatterHand(id)]);
+      batterSeasonStats[id] = stats;
+      batterHands[id] = hand;
     }));
   }
 
@@ -806,22 +1154,23 @@ async function main() {
 
   const candidates = [];
 
-  for (const id of ids) {
-    const bs   = batterSeasonStats[id];
-    const meta = batterMeta[id];
-    if (!bs || bs.ab < 40 || !meta.pitcher) continue;
+  for (const meta of lineupEntries) {
+    const bs = batterSeasonStats[meta.id];
+    if (!bs || bs.pa < MODEL.minBatterPa || !meta.pitcher) continue;
 
     const pitcher = pitcherInfo[meta.pitcher.id];
     if (!pitcher) continue;
 
     const s = score(
-      bs, pitcher, meta.parkFactor, meta.hand, meta.lineupPos, null
+      bs, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos, null
     );
 
     candidates.push({
-      batterId:    id,
+      key:         meta.key,
+      batterId:    meta.id,
       batterName:  meta.name,
       batterTeam:  meta.team,
+      pitcherId:   meta.pitcher.id,
       pitcherName: meta.pitcher.fullName,
       pitcherHand: pitcher.hand,
       homeTeamId:  meta.homeTeamId,
@@ -843,16 +1192,20 @@ async function main() {
 
   await Promise.all(top30.map(async pick => {
     const recent = await getBatterRecent(pick.batterId, startDate, date);
-    pick.batter.recentAvg = recent;
+    if (recent) {
+      pick.batter.recentAvg = recent.avg;
+      pick.batter.recentAb = recent.ab;
+      pick.batter.recentPa = recent.pa;
+      pick.batter.recentHPerPa = recent.hPerPa;
+    }
   }));
 
   // ── Stage 5: pitcher recent form (unique pitchers in top 30) ───────────────
   setStage('Fetching pitcher recent form…');
 
-  const top30PitcherIds = [...new Set(top30.map(p => p.pitcher))];
   const pitcherRecent = new Map();
   await Promise.all(
-    [...new Set(top30.map(p => batterMeta[p.batterId]?.pitcher?.id).filter(Boolean))].map(async pid => {
+    [...new Set(top30.map(p => p.pitcherId).filter(Boolean))].map(async pid => {
       const d = await getPitcherRecentERA(pid);
       pitcherRecent.set(pid, d);
     })
@@ -860,9 +1213,11 @@ async function main() {
 
   // Inject recent ERA and re-score top 30
   for (const pick of top30) {
-    const pid = batterMeta[pick.batterId]?.pitcher?.id;
+    const pid = pick.pitcherId;
     if (pid && pitcherRecent.has(pid)) {
-      pick.pitcher.recentERA = pitcherRecent.get(pid);
+      const recent = pitcherRecent.get(pid);
+      pick.pitcher.recentERA = recent?.era ?? null;
+      pick.pitcher.recentIp = recent?.ip ?? 0;
     }
     const wind = null; // fetched per-venue below for final top 6
     Object.assign(pick, score(
@@ -899,7 +1254,8 @@ async function main() {
 
   show(
     top6.map((p, i) => renderCard(p, i)).join('') +
-    `<button class="refresh-btn" onclick="location.reload()">↻ Refresh</button>`
+    `<button class="refresh-btn" onclick="location.reload()">↻ Refresh</button>` +
+    renderBacktestPanel()
   );
 }
 
@@ -916,7 +1272,7 @@ async function getPitcherRecentERA(id) {
       er += parseFloat(e.stat?.earnedRuns     || '0');
       ip += parseFloat(e.stat?.inningsPitched  || '0');
     }
-    return ip > 0 ? (er / ip * 9) : null;
+    return ip > 0 ? { era: er / ip * 9, ip } : null;
   } catch { return null; }
 }
 
