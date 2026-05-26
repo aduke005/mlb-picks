@@ -142,7 +142,6 @@ h1 {
 }
 
 .toolbar button {
-  width: 100%;
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--blue);
@@ -152,6 +151,22 @@ h1 {
   cursor: pointer;
   font-family: inherit;
 }
+
+.tracker-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.pick-result-row {
+  display: grid;
+  grid-template-columns: 32px 1fr 58px;
+  gap: 8px;
+  padding: 5px 0;
+  border-top: 1px solid var(--border);
+}
+
+.pick-result-row:first-child { border-top: 0; }
 
 .toolbar-output {
   margin-top: 8px;
@@ -388,9 +403,13 @@ footer {
 
 const API = 'https://statsapi.mlb.com/api/v1';
 const SEASON = new Date().getFullYear();
+const PAGE_CACHE_KEY = 'mlb-hr-watchlist-page-cache-v1';
+const PAGE_CACHE_TTL = 15 * 60 * 1000;
+const HR_PICK_STORE_KEY = 'mlb-hr-picks-saved-v1';
 
 let currentHrPicks = [];
 let currentHrDate = null;
+let lastCheckedHrRows = null;
 
 const LEAGUE = {
   hrPerPa: 0.030,
@@ -716,10 +735,19 @@ function renderSummary(picks) {
 }
 
 function renderToolbar() {
+  const saved = getSavedHrPicks();
+  const savedText = saved
+    ? `Saved ${saved.picks.length} HR picks for ${formatDate(saved.date)}.`
+    : 'Save today&apos;s HR list, then come back after the games finish to check it.';
   return `
 <div class="toolbar">
-  <button onclick="copyHrPicksForSheets()">Copy HR picks for Sheets</button>
-  <div class="toolbar-output" id="hr-toolbar-output">Copies today&apos;s HR watchlist as rows for Google Sheets.</div>
+  <div class="tracker-actions">
+    <button onclick="saveCurrentHrPicks()">Save HR picks</button>
+    <button onclick="copyHrPicksForSheets()">Copy HR picks for Sheets</button>
+    <button onclick="checkSavedHrPicks()">Check saved HR picks</button>
+    <button onclick="copyHrResultsForSheets()">Copy HR result columns</button>
+  </div>
+  <div class="toolbar-output" id="hr-toolbar-output">${savedText}</div>
 </div>`;
 }
 
@@ -842,6 +870,39 @@ function show(html) {
   document.getElementById('app').innerHTML = html;
 }
 
+function savePageCache() {
+  try {
+    sessionStorage.setItem(PAGE_CACHE_KEY, JSON.stringify({
+      savedAt: Date.now(),
+      appHtml: document.getElementById('app')?.innerHTML || '',
+      dateLabel: document.getElementById('date-label')?.textContent || '',
+      currentHrDate,
+      currentHrPicks,
+    }));
+  } catch {}
+}
+
+function restorePageCache() {
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(PAGE_CACHE_KEY) || 'null');
+    if (!cached || Date.now() - cached.savedAt > PAGE_CACHE_TTL) return false;
+    document.getElementById('app').innerHTML = cached.appHtml;
+    document.getElementById('date-label').textContent = cached.dateLabel || 'Cached watchlist';
+    currentHrDate = cached.currentHrDate || null;
+    currentHrPicks = cached.currentHrPicks || [];
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function refreshPage() {
+  try { sessionStorage.removeItem(PAGE_CACHE_KEY); } catch {}
+  location.reload();
+}
+
+window.refreshPage = refreshPage;
+
 const HR_SHEET_COLUMNS = [
   'Date',
   'Rank',
@@ -867,6 +928,67 @@ function rowsToTsv(rows) {
   return [HR_SHEET_COLUMNS, ...rows].map(row => row.map(tsvCell).join('\t')).join('\n');
 }
 
+function getSavedHrPicks() {
+  try {
+    return JSON.parse(localStorage.getItem(HR_PICK_STORE_KEY) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+function hrPickPayload(pick, idx) {
+  return {
+    rank: idx + 1,
+    gamePk: pick.gamePk,
+    batterId: pick.batterId,
+    batterName: pick.batterName,
+    batterTeam: pick.batterTeam,
+    prob: pick.prob,
+    rawProb: pick.rawProb,
+    pHr: pick.pHr,
+    pitcherName: pick.pitcherName,
+    pitcherHand: pick.pitcherHand,
+    lineupPos: pick.lineupPos,
+    venue: pick.venue,
+  };
+}
+
+function saveCurrentHrPicks() {
+  const out = document.getElementById('hr-toolbar-output');
+  if (!currentHrDate || !currentHrPicks.length) {
+    if (out) out.textContent = 'No HR picks are loaded yet.';
+    return;
+  }
+  const payload = {
+    date: currentHrDate,
+    savedAt: new Date().toISOString(),
+    picks: currentHrPicks.map(hrPickPayload),
+  };
+  localStorage.setItem(HR_PICK_STORE_KEY, JSON.stringify(payload));
+  lastCheckedHrRows = null;
+  if (out) out.textContent = `Saved ${payload.picks.length} HR picks for ${formatDate(payload.date)}.`;
+  savePageCache();
+}
+
+function hrSheetRow(date, pick, result = '', hr = '') {
+  return [
+    date,
+    pick.rank,
+    pick.batterName,
+    pick.batterTeam,
+    fmtPct(pick.prob),
+    fmtPct(pick.rawProb),
+    fmtPct(pick.pHr),
+    hrTier(pick.prob).label,
+    pick.pitcherName,
+    pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
+    pick.lineupPos,
+    pick.venue,
+    result,
+    hr,
+  ];
+}
+
 async function copyText(text, successMessage) {
   const out = document.getElementById('hr-toolbar-output');
   try {
@@ -885,6 +1007,7 @@ async function copyText(text, successMessage) {
       document.body.removeChild(ta);
     }
     if (out) out.textContent = successMessage;
+    savePageCache();
   } catch (e) {
     if (out) out.innerHTML = `<span class="bad">Copy failed: ${e.message}</span>`;
   }
@@ -897,27 +1020,100 @@ async function copyHrPicksForSheets() {
     return;
   }
 
-  const rows = currentHrPicks.map((pick, idx) => [
-    currentHrDate,
-    idx + 1,
-    pick.batterName,
-    pick.batterTeam,
-    fmtPct(pick.prob),
-    fmtPct(pick.rawProb),
-    fmtPct(pick.pHr),
-    hrTier(pick.prob).label,
-    pick.pitcherName,
-    pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
-    pick.lineupPos,
-    pick.venue,
-    '',
-    '',
-  ]);
+  saveCurrentHrPicks();
+  const saved = getSavedHrPicks();
+  const rows = saved.picks.map(pick => hrSheetRow(saved.date, pick));
 
   await copyText(rowsToTsv(rows), 'Copied HR watchlist rows. Paste them into Google Sheets.');
 }
 
+function renderSavedHrResults(saved, rows) {
+  const completed = rows.filter(r => r.status !== 'pending');
+  const homers = completed.filter(r => r.hr > 0).length;
+  const list = rows.map(r => `
+    <div class="pick-result-row">
+      <span>#${r.rank}</span>
+      <span>${r.name}</span>
+      <span class="${r.status === 'pending' ? 'neutral' : r.hr > 0 ? 'good' : 'bad'}">${r.status === 'pending' ? 'Pending' : r.hr > 0 ? `HR ${r.hr}` : 'No HR'}</span>
+    </div>`).join('');
+
+  return `
+    <div><strong>${formatDate(saved.date)}</strong></div>
+    <div>${completed.length}/${rows.length} picks final. HR hits: ${homers}.</div>
+    <div style="margin-top:8px">${list}</div>`;
+}
+
+async function getBoxscore(gamePk) {
+  return fetchJSON(`${API}/game/${gamePk}/boxscore`);
+}
+
+async function checkSavedHrPicks() {
+  const out = document.getElementById('hr-toolbar-output');
+  const saved = getSavedHrPicks();
+  if (!saved?.picks?.length) {
+    if (out) out.textContent = 'No saved HR picks yet. Tap "Save HR picks" first.';
+    return;
+  }
+
+  if (out) out.textContent = 'Checking final boxscores...';
+
+  try {
+    const boxscores = new Map();
+    await Promise.all([...new Set(saved.picks.map(p => p.gamePk).filter(Boolean))].map(async gamePk => {
+      boxscores.set(gamePk, await getBoxscore(gamePk));
+    }));
+
+    const rows = saved.picks.map(pick => {
+      const box = boxscores.get(pick.gamePk);
+      const player = Object.values(box?.teams?.away?.players || {})
+        .concat(Object.values(box?.teams?.home?.players || {}))
+        .find(p => p.person?.id === pick.batterId);
+      const batting = player?.stats?.batting;
+      return {
+        rank: pick.rank,
+        name: pick.batterName,
+        status: batting ? 'final' : 'pending',
+        hr: batting?.homeRuns ?? '',
+      };
+    });
+
+    lastCheckedHrRows = rows;
+    if (out) out.innerHTML = renderSavedHrResults(saved, rows);
+    savePageCache();
+  } catch (e) {
+    if (out) out.innerHTML = `<span class="bad">Could not check saved HR picks: ${e.message}</span>`;
+  }
+}
+
+async function copyHrResultsForSheets() {
+  const out = document.getElementById('hr-toolbar-output');
+  const saved = getSavedHrPicks();
+  if (!saved?.picks?.length) {
+    if (out) out.textContent = 'No saved HR picks yet. Tap "Save HR picks" first.';
+    return;
+  }
+
+  if (!lastCheckedHrRows) {
+    await checkSavedHrPicks();
+  }
+
+  if (!lastCheckedHrRows) return;
+
+  const resultRows = lastCheckedHrRows.map(row => [
+    row.status === 'pending' ? 'Pending' : row.hr > 0 ? 'HR' : 'No HR',
+    row.hr,
+  ]);
+
+  await copyText(
+    resultRows.map(row => row.map(tsvCell).join('\t')).join('\n'),
+    'Copied HR result columns. In Sheets, tap the first Result cell for this HR date, then paste.'
+  );
+}
+
+window.saveCurrentHrPicks = saveCurrentHrPicks;
 window.copyHrPicksForSheets = copyHrPicksForSheets;
+window.checkSavedHrPicks = checkSavedHrPicks;
+window.copyHrResultsForSheets = copyHrResultsForSheets;
 
 async function main() {
   const date = todayStr();
@@ -933,7 +1129,8 @@ async function main() {
   }
 
   if (!games.length) {
-    show(`<div class="info-box"><strong>No Games Today</strong>No MLB games scheduled.</div>`);
+    show(renderToolbar() + `<div class="info-box"><strong>No Games Today</strong>No MLB games scheduled.</div>`);
+    savePageCache();
     return;
   }
 
@@ -944,12 +1141,13 @@ async function main() {
   );
 
   if (!gamesWithLineups.length) {
-    show(`
+    show(renderToolbar() + `
       <div class="info-box">
         <strong>Lineups Not Yet Posted</strong>
         Try again once lineups are posted, usually 3-4 hours before first pitch.
-        <button class="refresh-btn" onclick="location.reload()">Refresh</button>
+        <button class="refresh-btn" onclick="refreshPage()">Refresh</button>
       </div>`);
+    savePageCache();
     return;
   }
 
@@ -1057,6 +1255,7 @@ async function main() {
 
   if (!topPicks.length) {
     show(`<div class="info-box"><strong>No HR Watchlist Yet</strong>Try again once lineups and player stats are available.</div>`);
+    savePageCache();
     return;
   }
 
@@ -1068,12 +1267,13 @@ async function main() {
     renderToolbar() +
     `<div class="note">Home runs are rare. A 15% chance is a strong HR spot, but it still misses most of the time.</div>` +
     topPicks.map((p, i) => renderCard(p, i)).join('') +
-    `<button class="refresh-btn" onclick="location.reload()">Refresh</button>`
+    `<button class="refresh-btn" onclick="refreshPage()">Refresh</button>`
   );
+  savePageCache();
 }
 
-main().catch(e => show(
-  `<div class="error-box">Error: ${e.message}<button class="refresh-btn" onclick="location.reload()">Retry</button></div>`
+if (!restorePageCache()) main().catch(e => show(
+  `<div class="error-box">Error: ${e.message}<button class="refresh-btn" onclick="refreshPage()">Retry</button></div>`
 ));
 </script>
 </body>

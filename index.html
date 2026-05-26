@@ -470,6 +470,8 @@ const WEATHER_KEY = null;
 const API    = 'https://statsapi.mlb.com/api/v1';
 const SEASON = new Date().getFullYear();
 const PICK_STORE_KEY = 'mlb-hit-picks-saved-v1';
+const PAGE_CACHE_KEY = 'mlb-hit-picks-page-cache-v1';
+const PAGE_CACHE_TTL = 15 * 60 * 1000;
 
 let currentPickDate = null;
 let currentTopPicks = [];
@@ -1027,7 +1029,7 @@ function getSavedPicks() {
 function renderPickTracker() {
   const saved = getSavedPicks();
   const savedText = saved
-    ? `Saved ${saved.picks.length} picks for ${formatDate(saved.date)}. Check them after those games finish.`
+    ? `Saved ${saved.picks.length} picks for ${formatDate(saved.date)}. This browser remembers the latest saved day.`
     : 'Save today\'s list, then come back after the games finish to check those exact picks.';
 
   return `
@@ -1074,6 +1076,7 @@ function saveCurrentPicks() {
   localStorage.setItem(PICK_STORE_KEY, JSON.stringify(payload));
   lastCheckedPickRows = null;
   if (out) out.textContent = `Saved ${payload.picks.length} picks for ${formatDate(payload.date)}. Come back after the games finish and tap "Check saved picks."`;
+  savePageCache();
 }
 
 const SHEET_COLUMNS = [
@@ -1214,6 +1217,7 @@ async function checkSavedPicks() {
 
     lastCheckedPickRows = rows;
     if (out) out.innerHTML = renderSavedPickResults(saved, rows);
+    savePageCache();
   } catch (e) {
     if (out) out.innerHTML = `<span class="bad">Could not check saved picks: ${e.message}</span>`;
   }
@@ -1454,7 +1458,11 @@ async function main() {
   }
 
   if (!games.length) {
-    show(`<div class="info-box"><strong>No Games Today</strong>No MLB games scheduled.</div>`);
+    show(
+      renderPickTracker() +
+      `<div class="info-box"><strong>No Games Today</strong>No MLB games scheduled.</div>`
+    );
+    savePageCache();
     return;
   }
 
@@ -1469,14 +1477,18 @@ async function main() {
     const probCount = games.filter(g =>
       g.teams?.home?.probablePitcher || g.teams?.away?.probablePitcher
     ).length;
-    show(`
+    show(
+      renderPickTracker() +
+      `
       <div class="info-box">
         <strong>Lineups Not Yet Posted</strong>
         ${playableCount} game${playableCount !== 1 ? 's' : ''} still upcoming or live,
         ${probCount} with probable pitchers set.<br><br>
         Lineups typically post 3–4 hours before first pitch.
-        <button class="refresh-btn" onclick="location.reload()">↻ Refresh</button>
-      </div>`);
+        <button class="refresh-btn" onclick="refreshPage()">↻ Refresh</button>
+      </div>`
+    );
+    savePageCache();
     return;
   }
 
@@ -1624,7 +1636,11 @@ async function main() {
   const topPicks = top30.slice(0, 7);
 
   if (!topPicks.length) {
-    show(`<div class="info-box"><strong>No More Actionable Picks</strong>Remaining games may be final, missing lineups, or missing enough player data.</div>`);
+    show(
+      renderPickTracker() +
+      `<div class="info-box"><strong>No More Actionable Picks</strong>Remaining games may be final, missing lineups, or missing enough player data.</div>`
+    );
+    savePageCache();
     return;
   }
 
@@ -1654,9 +1670,10 @@ async function main() {
     renderSummary(topPicks) +
     renderPickTracker() +
     topPicks.map((p, i) => renderCard(p, i)).join('') +
-    `<button class="refresh-btn" onclick="location.reload()">↻ Refresh</button>` +
+    `<button class="refresh-btn" onclick="refreshPage()">↻ Refresh</button>` +
     renderBacktestPanel()
   );
+  savePageCache();
 }
 
 // Last 5 game-log entries, returned with innings for sample-size shrinkage.
@@ -1680,9 +1697,42 @@ function show(html) {
   document.getElementById('app').innerHTML = html;
 }
 
-main().catch(e => show(
+function savePageCache() {
+  try {
+    sessionStorage.setItem(PAGE_CACHE_KEY, JSON.stringify({
+      savedAt: Date.now(),
+      appHtml: document.getElementById('app')?.innerHTML || '',
+      dateLabel: document.getElementById('date-label')?.textContent || '',
+      currentPickDate,
+      currentTopPicks,
+    }));
+  } catch {}
+}
+
+function restorePageCache() {
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(PAGE_CACHE_KEY) || 'null');
+    if (!cached || Date.now() - cached.savedAt > PAGE_CACHE_TTL) return false;
+    document.getElementById('app').innerHTML = cached.appHtml;
+    document.getElementById('date-label').textContent = cached.dateLabel || 'Cached picks';
+    currentPickDate = cached.currentPickDate || null;
+    currentTopPicks = cached.currentTopPicks || [];
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function refreshPage() {
+  try { sessionStorage.removeItem(PAGE_CACHE_KEY); } catch {}
+  location.reload();
+}
+
+window.refreshPage = refreshPage;
+
+if (!restorePageCache()) main().catch(e => show(
   `<div class="error-box">Error: ${e.message}` +
-  `<button class="refresh-btn" onclick="location.reload()">↻ Retry</button></div>`
+  `<button class="refresh-btn" onclick="refreshPage()">↻ Retry</button></div>`
 ));
 </script>
 </body>
