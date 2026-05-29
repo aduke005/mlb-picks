@@ -70,6 +70,31 @@ h1 {
   background: var(--inset);
 }
 
+.top-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.top-refresh {
+  width: 38px;
+  height: 32px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--blue);
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.updated-at {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 5px;
+  min-height: 1em;
+}
+
 .summary-list {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -156,6 +181,10 @@ h1 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.tracker-actions button:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
 }
 
 .pick-result-row {
@@ -251,6 +280,16 @@ h1 {
 
 .matchup-line { font-size: 0.85rem; color: var(--text); margin-bottom: 2px; }
 .game-time { font-size: 0.75rem; color: var(--muted); margin-bottom: 10px; }
+.card-summary {
+  background: var(--inset);
+  border-left: 3px solid var(--blue);
+  border-radius: 8px;
+  padding: 9px 10px;
+  margin: 8px 0 10px;
+  color: var(--text);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
 
 .stat-group-label {
   font-size: 0.62rem;
@@ -384,6 +423,10 @@ footer {
     <a class="tab" href="index.html">Hits</a>
     <a class="tab active" href="hr.html">Home Runs</a>
   </nav>
+  <div class="top-actions">
+    <button class="top-refresh" onclick="refreshPage()" title="Refresh picks" aria-label="Refresh picks">↻</button>
+  </div>
+  <div class="updated-at" id="updated-at"></div>
 </header>
 
 <div id="app">
@@ -406,13 +449,14 @@ const SEASON = new Date().getFullYear();
 const PAGE_CACHE_KEY = 'mlb-hr-watchlist-page-cache-v1';
 const PAGE_CACHE_TTL = 15 * 60 * 1000;
 const HR_PICK_STORE_KEY = 'mlb-hr-picks-saved-v1';
+const HR_PICK_HISTORY_KEY = 'mlb-hr-picks-history-v1';
 
 let currentHrPicks = [];
 let currentHrDate = null;
 let lastCheckedHrRows = null;
 
 const LEAGUE = {
-  hrPerPa: 0.030,
+  hrPerPa: 0.028,
   iso: 0.152,
   slg: 0.400,
   era: 4.30,
@@ -428,7 +472,7 @@ const MODEL = {
   pitcherIpPrior: 60,
   recentPaPrior: 35,
   maxHrPerPa: 0.065,
-  calibrationDamp: 0.72,
+  calibrationDamp: 0.66,
 };
 
 const HR_PARK = {
@@ -481,6 +525,39 @@ function shrink(value, baseline, sample, prior) {
   return ((value * n) + (baseline * prior)) / (n + prior);
 }
 
+function splitKeyForHand(hand) {
+  return hand === 'L' ? 'vl' : 'vr';
+}
+
+function parseSplitStats(d) {
+  const out = {};
+  for (const split of d.stats?.[0]?.splits || []) {
+    const code = split.split?.code;
+    const s = split.stat || {};
+    if (!code) continue;
+    const pa = parseInt(s.plateAppearances || s.battersFaced || s.atBats || '0', 10);
+    const ab = parseInt(s.atBats || '0', 10);
+    const hits = parseInt(s.hits || '0', 10);
+    const so = parseInt(s.strikeOuts || '0', 10);
+    const hr = parseInt(s.homeRuns || '0', 10);
+    out[code] = {
+      pa,
+      ab,
+      hits,
+      hr,
+      avg: parseFloat(s.avg || '0'),
+      ops: parseFloat(s.ops || '0'),
+      slg: parseFloat(s.slg || '0'),
+      whip: parseFloat(s.whip || String(LEAGUE.whip)),
+      hr9: parseFloat(s.homeRunsPer9 || String(LEAGUE.hr9)),
+      k9: parseFloat(s.strikeoutsPer9Inn || s.strikeOutsPer9Inn || String(LEAGUE.k9)),
+      kPct: pa > 0 ? so / pa : LEAGUE.kPct,
+      hrPerPa: pa > 0 ? hr / pa : LEAGUE.hrPerPa,
+    };
+  }
+  return out;
+}
+
 function todayStr() { return new Date().toLocaleDateString('en-CA'); }
 
 function recentStartDate(days = 15) {
@@ -523,6 +600,16 @@ function setStage(msg) {
   if (el) el.textContent = msg;
 }
 
+function setUpdatedAt(value = new Date()) {
+  const el = document.getElementById('updated-at');
+  if (!el) return;
+  el.textContent = `Updated ${value.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  })}`;
+}
+
 async function getSchedule(date) {
   const d = await fetchJSON(
     `${API}/schedule?sportId=1&date=${date}&hydrate=probablePitcher,lineups,team`
@@ -557,9 +644,10 @@ async function getBatterHand(id) {
 
 async function getPitcherInfo(id) {
   try {
-    const [sd, pd] = await Promise.all([
+    const [sd, pd, sp] = await Promise.all([
       fetchJSON(`${API}/people/${id}/stats?stats=season&season=${SEASON}&group=pitching`),
       getPersonInfo(id),
+      fetchJSON(`${API}/people/${id}/stats?stats=statSplits&season=${SEASON}&group=pitching&sitCodes=vl,vr`),
     ]);
     const s = sd.stats?.[0]?.splits?.[0]?.stat || {};
     const ip = parseFloat(s.inningsPitched || '0');
@@ -571,6 +659,7 @@ async function getPitcherInfo(id) {
       hr9: ip > 0 ? (hr / ip * 9) : LEAGUE.hr9,
       k9: ip > 0 ? (parseInt(s.strikeOuts || '0', 10) / ip * 9) : LEAGUE.k9,
       ip,
+      splits: parseSplitStats(sp),
     };
   } catch {
     return { hand: 'R', era: LEAGUE.era, whip: LEAGUE.whip, hr9: LEAGUE.hr9, k9: LEAGUE.k9, ip: 0 };
@@ -579,9 +668,10 @@ async function getPitcherInfo(id) {
 
 async function getBatterStats(id) {
   try {
-    const d = await fetchJSON(
-      `${API}/people/${id}/stats?stats=season&season=${SEASON}&group=hitting`
-    );
+    const [d, sp] = await Promise.all([
+      fetchJSON(`${API}/people/${id}/stats?stats=season&season=${SEASON}&group=hitting`),
+      fetchJSON(`${API}/people/${id}/stats?stats=statSplits&season=${SEASON}&group=hitting&sitCodes=vl,vr,a`),
+    ]);
     const s = d.stats?.[0]?.splits?.[0]?.stat;
     if (!s) return null;
     const ab = parseInt(s.atBats || '0', 10);
@@ -600,6 +690,7 @@ async function getBatterStats(id) {
       pa,
       hrPerPa: pa > 0 ? hr / pa : LEAGUE.hrPerPa,
       kPct: pa > 0 ? so / pa : LEAGUE.kPct,
+      splits: parseSplitStats(sp),
     };
   } catch { return null; }
 }
@@ -624,9 +715,36 @@ async function getBatterRecentPower(id, startDate, endDate) {
   } catch { return null; }
 }
 
+async function getPitcherRecentHrRisk(id) {
+  try {
+    const d = await fetchJSON(
+      `${API}/people/${id}/stats?stats=gameLog&season=${SEASON}&group=pitching`
+    );
+    const games = (d.stats?.[0]?.splits || []).slice(-5);
+    let ip = 0;
+    let hr = 0;
+    for (const g of games) {
+      const s = g.stat || {};
+      ip += parseFloat(s.inningsPitched || '0') || 0;
+      hr += parseInt(s.homeRuns || '0', 10) || 0;
+    }
+    if (ip <= 0) return null;
+    return { hr9: hr / ip * 9, ip, hr };
+  } catch {
+    return null;
+  }
+}
+
 function expectedPAs(lineupPos) {
   const table = [4.7, 4.5, 4.3, 4.1, 4.0, 3.9, 3.8, 3.6, 3.5];
   return table[clamp(lineupPos - 1, 0, 8)];
+}
+
+function ttoFactor(lineupPos) {
+  if (lineupPos <= 2) return 1.035;
+  if (lineupPos <= 4) return 1.025;
+  if (lineupPos <= 6) return 1.010;
+  return 1.0;
 }
 
 function calibrateProbability(rawProb, ePAs) {
@@ -638,26 +756,59 @@ function calibrateProbability(rawProb, ePAs) {
   );
 }
 
-function score(batter, pitcher, parkFactor, batterHand, lineupPos) {
+function average(values) {
+  const nums = values.filter(v => Number.isFinite(v));
+  if (!nums.length) return null;
+  return nums.reduce((sum, v) => sum + v, 0) / nums.length;
+}
+
+function hrGameEnvironmentFactors(candidates) {
+  const grouped = new Map();
+  for (const pick of candidates) {
+    if (!grouped.has(pick.gamePk)) grouped.set(pick.gamePk, []);
+    grouped.get(pick.gamePk).push(pick);
+  }
+
+  const factors = new Map();
+  for (const [gamePk, picks] of grouped.entries()) {
+    const avgEnv = average(picks.map(p => p.pitcherRisk * p.parkFactor));
+    factors.set(gamePk, avgEnv == null ? 1.0 : clamp(shrink(avgEnv, 1.0, picks.length, 10), 0.90, 1.10));
+  }
+  return factors;
+}
+
+function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor = 1.0, isAway = false) {
   const platoon = PLATOON[`${batterHand}v${pitcher.hand}`] ?? 1.0;
+  const matchupBatterHand = batterHand === 'S'
+    ? (pitcher.hand === 'L' ? 'R' : 'L')
+    : batterHand;
+  const batterSplit = batter.splits?.[splitKeyForHand(pitcher.hand)] || null;
+  const pitcherSplit = pitcher.splits?.[splitKeyForHand(matchupBatterHand)] || null;
+  const awaySplit = isAway ? batter.splits?.a || null : null;
   const ePAs = expectedPAs(lineupPos);
+  const splitHrPerPa = batterSplit
+    ? shrink(batterSplit.hrPerPa || LEAGUE.hrPerPa, batter.hrPerPa || LEAGUE.hrPerPa, batterSplit.pa, 140)
+    : (batter.hrPerPa || LEAGUE.hrPerPa);
   const seasonHrRate = shrink(
-    batter.hrPerPa || LEAGUE.hrPerPa,
+    splitHrPerPa,
     LEAGUE.hrPerPa,
-    batter.pa || 0,
+    Math.max(batter.pa || 0, batterSplit?.pa || 0),
     MODEL.batterPaPrior
   );
+  const splitAvg = batterSplit
+    ? shrink(batterSplit.avg || batter.avg || 0, batter.avg || 0, batterSplit.pa, 140)
+    : batter.avg;
+  const splitSlg = batterSplit
+    ? shrink(batterSplit.slg || batter.slg || LEAGUE.slg, batter.slg || LEAGUE.slg, batterSplit.pa, 140)
+    : batter.slg;
+  const splitIso = Math.max(0, (splitSlg || LEAGUE.slg) - (splitAvg || 0));
   const isoAdj = clamp(
-    1 + 0.60 * ((batter.iso || LEAGUE.iso) - LEAGUE.iso) / LEAGUE.iso,
-    0.55, 1.85
-  );
-  const slgAdj = clamp(
-    1 + 0.10 * ((batter.slg || LEAGUE.slg) - LEAGUE.slg) / LEAGUE.slg,
-    0.90, 1.15
+    1 + 0.70 * ((splitIso || LEAGUE.iso) - LEAGUE.iso) / LEAGUE.iso,
+    0.50, 1.95
   );
   const contactAdj = clamp(
-    (1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct),
-    0.78, 1.12
+    1 + 0.08 * (((1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct)) - 1),
+    0.94, 1.05
   );
   const recentRate = batter.recentHrPerPa != null
     ? shrink(batter.recentHrPerPa, seasonHrRate, batter.recentPa || 0, MODEL.recentPaPrior)
@@ -665,26 +816,45 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos) {
   const recentAdj = recentRate != null
     ? clamp(1 + 0.30 * (recentRate - seasonHrRate) / Math.max(seasonHrRate, 0.01), 0.85, 1.20)
     : 1.0;
+  const awayHrRate = awaySplit
+    ? shrink(awaySplit.hrPerPa || LEAGUE.hrPerPa, batter.hrPerPa || LEAGUE.hrPerPa, awaySplit.pa, 160)
+    : null;
+  const awayAdj = awayHrRate != null
+    ? clamp(1 + 0.40 * (awayHrRate - (batter.hrPerPa || LEAGUE.hrPerPa)) / Math.max(batter.hrPerPa || LEAGUE.hrPerPa, 0.01), 0.88, 1.12)
+    : 1.0;
+  const splitHr9 = pitcherSplit
+    ? shrink(pitcherSplit.hr9 || LEAGUE.hr9, pitcher.hr9 || LEAGUE.hr9, pitcherSplit.pa, 120)
+    : pitcher.hr9;
+  const splitK9 = pitcherSplit
+    ? shrink(pitcherSplit.k9 || LEAGUE.k9, pitcher.k9 || LEAGUE.k9, pitcherSplit.pa, 120)
+    : pitcher.k9;
+  const splitWhip = pitcherSplit
+    ? shrink(pitcherSplit.whip || LEAGUE.whip, pitcher.whip || LEAGUE.whip, pitcherSplit.pa, 120)
+    : pitcher.whip;
+  const recentHr9 = pitcher.recentHr9 != null
+    ? shrink(pitcher.recentHr9, splitHr9 || LEAGUE.hr9, pitcher.recentHrIp || 0, 18)
+    : splitHr9;
   const rawPitcherRisk = clamp(
-    (pitcher.hr9 / LEAGUE.hr9) * 0.55 +
-    (LEAGUE.k9 / Math.max(pitcher.k9, 1)) * 0.25 +
-    (pitcher.era / LEAGUE.era) * 0.10 +
-    (pitcher.whip / LEAGUE.whip) * 0.10,
+    (splitHr9 / LEAGUE.hr9) * 0.45 +
+    (recentHr9 / LEAGUE.hr9) * 0.15 +
+    (LEAGUE.k9 / Math.max(splitK9, 1)) * 0.22 +
+    (pitcher.era / LEAGUE.era) * 0.08 +
+    (splitWhip / LEAGUE.whip) * 0.10,
     0.65, 1.65
   );
   const pitcherRisk = clamp(
-    shrink(rawPitcherRisk, 1.0, pitcher.ip || 0, MODEL.pitcherIpPrior),
+    shrink(rawPitcherRisk, 1.0, pitcher.ip || 0, MODEL.pitcherIpPrior) * ttoFactor(lineupPos),
     0.78, 1.38
   );
-  const rawPHr = seasonHrRate * isoAdj * slgAdj * contactAdj * recentAdj * pitcherRisk * platoon * parkFactor;
+  const rawPHr = seasonHrRate * isoAdj * contactAdj * recentAdj * awayAdj * pitcherRisk * platoon * parkFactor * gameEnvFactor;
   const pHr = clamp(softCap(rawPHr, MODEL.maxHrPerPa), 0.003, MODEL.maxHrPerPa);
   const rawProb = 1 - Math.pow(1 - pHr, ePAs);
   const prob = calibrateProbability(rawProb, ePAs);
 
   return {
     prob, rawProb, pHr, seasonHrRate,
-    isoAdj, slgAdj, contactAdj, recentAdj, pitcherRisk, platoon, parkFactor,
-    ePAs, batterHand, pitcherHand: pitcher.hand,
+    isoAdj, contactAdj, recentAdj, awayAdj, pitcherRisk, platoon, parkFactor, ttoAdj: ttoFactor(lineupPos), gameEnvFactor,
+    ePAs, batterHand, pitcherHand: pitcher.hand, batterSplit, pitcherSplit, awaySplit, isAway,
   };
 }
 
@@ -715,10 +885,33 @@ function platoonLabel(b, p) {
   return `${bat} vs ${pit}`;
 }
 
+function joinReasons(reasons) {
+  if (reasons.length <= 1) return reasons.join('');
+  return `${reasons.slice(0, -1).join(', ')} and ${reasons[reasons.length - 1]}`;
+}
+
 function hrTier(prob) {
   if (prob >= 0.15) return { label: 'Strong HR spot', cls: 'good' };
   if (prob >= 0.10) return { label: 'Good HR spot', cls: 'neutral' };
   return { label: 'Speculative power shot', cls: 'bad' };
+}
+
+function hrPickSummary(pick) {
+  const reasons = [];
+  if (pick.isoAdj > 1.08) reasons.push('his power profile stands out');
+  if (pick.pitcherRisk > 1.06) reasons.push('the pitcher is allowing more HR risk than average');
+  if (pick.pitcher.recentHr9 != null && pick.pitcher.recentHr9 > LEAGUE.hr9 * 1.2) reasons.push('the pitcher has allowed recent home run damage');
+  if (pick.parkFactor > 1.04) reasons.push('the ballpark helps home runs');
+  if (pick.lineupPos <= 3) reasons.push('he should get more trips to the plate');
+  if (pick.platoon > 1.02) reasons.push('the handedness matchup helps');
+  if (pick.recentAdj > 1.03) reasons.push('his recent power trend is positive');
+  if (pick.isAway && pick.awayAdj > 1.02) reasons.push('his road power profile travels well');
+  if (pick.isAway && pick.awayAdj < 0.98) reasons.push('his road power profile is a small concern');
+  if (pick.ttoAdj > 1.02) reasons.push('his lineup spot gives him a better shot at seeing a tiring starter');
+  if (pick.gameEnvFactor > 1.02) reasons.push('this specific game looks better for home runs overall');
+  if (pick.gameEnvFactor < 0.98) reasons.push('this specific game looks tougher for home runs overall');
+  if (!reasons.length) reasons.push('his overall power setup is one of the better spots today');
+  return `Why this HR shot: ${joinReasons(reasons)}.`;
 }
 
 function renderSummary(picks) {
@@ -738,7 +931,7 @@ function renderToolbar() {
   const saved = getSavedHrPicks();
   const savedText = saved
     ? `Saved ${saved.picks.length} HR picks for ${formatDate(saved.date)}.`
-    : 'Save today&apos;s HR list, then come back after the games finish to check it.';
+    : 'The first loaded HR list auto-saves for tracking. Use Save only if you want to replace it.';
   return `
 <div class="toolbar">
   <div class="tracker-actions">
@@ -746,6 +939,8 @@ function renderToolbar() {
     <button onclick="copyHrPicksForSheets()">Copy HR picks for Sheets</button>
     <button onclick="checkSavedHrPicks()">Check saved HR picks</button>
     <button onclick="copyHrResultsForSheets()">Copy HR result columns</button>
+    <button onclick="copyCompletedHrRowsForSheets()">Copy completed HR rows</button>
+    <button onclick="copyHrDebugRowsForSheets()">Copy HR debug rows</button>
   </div>
   <div class="toolbar-output" id="hr-toolbar-output">${savedText}</div>
 </div>`;
@@ -796,6 +991,7 @@ function renderCard(pick, rank) {
   <div class="matchup-line">vs ${pick.pitcherName} (${pick.pitcherHand === 'L' ? 'lefty pitcher' : 'righty pitcher'})</div>
   <div class="game-time">${pick.gameTime} - ${pick.venue}</div>
   ${pick.statusNote ? `<div class="status-alert">${pick.statusNote}</div>` : ''}
+  <div class="card-summary">${hrPickSummary(pick)}</div>
 
   <div class="stat-group-label">Power profile</div>
   <div class="stats-row">
@@ -858,9 +1054,22 @@ function renderCard(pick, rank) {
       <span class="factor-name">Ballpark: ${parkName}</span>
       <span class="factor-val ${fcls(pick.parkFactor)}">${factorText(pick.parkFactor)}</span>
     </div>
+    ${pick.isAway ? `
+    <div class="factor">
+      <span class="factor-name">Road power profile</span>
+      <span class="factor-val ${fcls(pick.awayAdj)}">${factorText(pick.awayAdj)}</span>
+    </div>` : ''}
+    <div class="factor">
+      <span class="factor-name">This game's HR environment</span>
+      <span class="factor-val ${fcls(pick.gameEnvFactor)}">${factorText(pick.gameEnvFactor)}</span>
+    </div>
     <div class="factor">
       <span class="factor-name">Batting order #${pick.lineupPos} (~${pick.ePAs.toFixed(1)} trips)</span>
       <span class="factor-val ${pick.lineupPos <= 3 ? 'good' : 'neutral'}">${pick.lineupPos <= 3 ? 'More chances' : 'Typical chances'}</span>
+    </div>
+    <div class="factor">
+      <span class="factor-name">Starter fatigue chance</span>
+      <span class="factor-val ${fcls(pick.ttoAdj)}">${factorText(pick.ttoAdj)}</span>
     </div>
   </div>
 </div>`;
@@ -876,6 +1085,7 @@ function savePageCache() {
       savedAt: Date.now(),
       appHtml: document.getElementById('app')?.innerHTML || '',
       dateLabel: document.getElementById('date-label')?.textContent || '',
+      updatedAt: document.getElementById('updated-at')?.textContent || '',
       currentHrDate,
       currentHrPicks,
     }));
@@ -888,6 +1098,7 @@ function restorePageCache() {
     if (!cached || Date.now() - cached.savedAt > PAGE_CACHE_TTL) return false;
     document.getElementById('app').innerHTML = cached.appHtml;
     document.getElementById('date-label').textContent = cached.dateLabel || 'Cached watchlist';
+    document.getElementById('updated-at').textContent = cached.updatedAt || '';
     currentHrDate = cached.currentHrDate || null;
     currentHrPicks = cached.currentHrPicks || [];
     return true;
@@ -920,6 +1131,31 @@ const HR_SHEET_COLUMNS = [
   'HR',
 ];
 
+const HR_DEBUG_COLUMNS = [
+  'Date',
+  'Rank',
+  'Player',
+  'Team',
+  'HR Chance',
+  'Result',
+  'Outcome',
+  'HR',
+  'Single-trip HR Rate',
+  'Power Adj',
+  'Pitcher Risk',
+  'Road Adj',
+  'TTO Adj',
+  'Game Env',
+  'Park',
+  'Recent Adj',
+  'Contact Adj',
+  'Handedness',
+  'Batting Order',
+  'Pitcher',
+  'Pitcher Hand',
+  'Venue',
+];
+
 function tsvCell(value) {
   return String(value ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
 }
@@ -928,24 +1164,70 @@ function rowsToTsv(rows) {
   return [HR_SHEET_COLUMNS, ...rows].map(row => row.map(tsvCell).join('\t')).join('\n');
 }
 
+function rowsToTsvWithColumns(columns, rows) {
+  return [columns, ...rows].map(row => row.map(tsvCell).join('\t')).join('\n');
+}
+
 function getSavedHrPicks() {
   try {
-    return JSON.parse(localStorage.getItem(HR_PICK_STORE_KEY) || 'null');
+    const history = getHrPickHistory();
+    const fromHistory = pickSavedPayload(history, true);
+    return fromHistory || JSON.parse(localStorage.getItem(HR_PICK_STORE_KEY) || 'null');
   } catch {
     return null;
   }
+}
+
+function getHrPickHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(HR_PICK_HISTORY_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function pickSavedPayload(history, preferPastDate = false) {
+  const values = Object.values(history || {}).filter(p => p?.date && p?.picks?.length);
+  if (!values.length) return null;
+  values.sort((a, b) => b.date.localeCompare(a.date));
+  if (preferPastDate) {
+    const today = todayStr();
+    return values.find(p => p.date < today) || values[0];
+  }
+  return values[0];
+}
+
+function storeHrPickPayload(payload) {
+  const history = getHrPickHistory();
+  history[payload.date] = payload;
+  localStorage.setItem(HR_PICK_HISTORY_KEY, JSON.stringify(history));
+  localStorage.setItem(HR_PICK_STORE_KEY, JSON.stringify(payload));
+}
+
+function hasSavedHrPicksForDate(date) {
+  return !!getHrPickHistory()[date];
 }
 
 function hrPickPayload(pick, idx) {
   return {
     rank: idx + 1,
     gamePk: pick.gamePk,
+    side: pick.side,
     batterId: pick.batterId,
     batterName: pick.batterName,
     batterTeam: pick.batterTeam,
     prob: pick.prob,
     rawProb: pick.rawProb,
     pHr: pick.pHr,
+    isoAdj: pick.isoAdj,
+    pitcherRisk: pick.pitcherRisk,
+    awayAdj: pick.awayAdj,
+    ttoAdj: pick.ttoAdj,
+    gameEnvFactor: pick.gameEnvFactor,
+    parkFactor: pick.parkFactor,
+    recentAdj: pick.recentAdj,
+    contactAdj: pick.contactAdj,
+    platoon: pick.platoon,
     pitcherName: pick.pitcherName,
     pitcherHand: pick.pitcherHand,
     lineupPos: pick.lineupPos,
@@ -964,10 +1246,21 @@ function saveCurrentHrPicks() {
     savedAt: new Date().toISOString(),
     picks: currentHrPicks.map(hrPickPayload),
   };
-  localStorage.setItem(HR_PICK_STORE_KEY, JSON.stringify(payload));
+  storeHrPickPayload(payload);
   lastCheckedHrRows = null;
   if (out) out.textContent = `Saved ${payload.picks.length} HR picks for ${formatDate(payload.date)}.`;
   savePageCache();
+}
+
+function autoSaveCurrentHrPicks() {
+  if (!currentHrDate || !currentHrPicks.length) return;
+  if (hasSavedHrPicksForDate(currentHrDate)) return;
+  const payload = {
+    date: currentHrDate,
+    savedAt: new Date().toISOString(),
+    picks: currentHrPicks.map(hrPickPayload),
+  };
+  storeHrPickPayload(payload);
 }
 
 function hrSheetRow(date, pick, result = '', hr = '') {
@@ -986,6 +1279,38 @@ function hrSheetRow(date, pick, result = '', hr = '') {
     pick.venue,
     result,
     hr,
+  ];
+}
+
+function decText(value, places = 3) {
+  return value == null || value === '' || isNaN(value) ? '' : Number(value).toFixed(places);
+}
+
+function hrDebugRow(date, pick, result = '', hr = '') {
+  const outcome = result === 'HR' ? 1 : result === 'No HR' ? 0 : '';
+  return [
+    date,
+    pick.rank,
+    pick.batterName,
+    pick.batterTeam,
+    fmtPct(pick.prob),
+    result,
+    outcome,
+    hr,
+    decText(pick.pHr),
+    decText(pick.isoAdj),
+    decText(pick.pitcherRisk),
+    decText(pick.awayAdj),
+    decText(pick.ttoAdj),
+    decText(pick.gameEnvFactor),
+    decText(pick.parkFactor),
+    decText(pick.recentAdj),
+    decText(pick.contactAdj),
+    decText(pick.platoon),
+    pick.lineupPos,
+    pick.pitcherName,
+    pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
+    pick.venue,
   ];
 }
 
@@ -1085,6 +1410,33 @@ async function checkSavedHrPicks() {
   }
 }
 
+async function getSavedHrRowsWithResults() {
+  const saved = getSavedHrPicks();
+  if (!saved?.picks?.length) return null;
+
+  const boxscores = new Map();
+  await Promise.all([...new Set(saved.picks.map(p => p.gamePk).filter(Boolean))].map(async gamePk => {
+    boxscores.set(gamePk, await getBoxscore(gamePk));
+  }));
+
+  const rows = saved.picks.map(pick => {
+    const box = boxscores.get(pick.gamePk);
+    const player = Object.values(box?.teams?.away?.players || {})
+      .concat(Object.values(box?.teams?.home?.players || {}))
+      .find(p => p.person?.id === pick.batterId);
+    const batting = player?.stats?.batting;
+    const hr = batting?.homeRuns ?? '';
+    return {
+      pick,
+      status: batting ? 'final' : 'pending',
+      result: batting ? (hr > 0 ? 'HR' : 'No HR') : 'Pending',
+      hr,
+    };
+  });
+
+  return { saved, rows };
+}
+
 async function copyHrResultsForSheets() {
   const out = document.getElementById('hr-toolbar-output');
   const saved = getSavedHrPicks();
@@ -1110,15 +1462,60 @@ async function copyHrResultsForSheets() {
   );
 }
 
+async function copyCompletedHrRowsForSheets() {
+  const out = document.getElementById('hr-toolbar-output');
+  const data = await getSavedHrRowsWithResults();
+  if (!data) {
+    if (out) out.textContent = 'No saved HR picks yet.';
+    return;
+  }
+
+  const rows = data.rows.map(row => hrSheetRow(
+    data.saved.date,
+    row.pick,
+    row.result,
+    row.hr
+  ));
+
+  await copyText(
+    rowsToTsv(rows),
+    'Copied completed HR rows. Paste them into Google Sheets as new rows.'
+  );
+}
+
+async function copyHrDebugRowsForSheets() {
+  const out = document.getElementById('hr-toolbar-output');
+  const data = await getSavedHrRowsWithResults();
+  if (!data) {
+    if (out) out.textContent = 'No saved HR picks yet.';
+    return;
+  }
+
+  const rows = data.rows.map(row => hrDebugRow(
+    data.saved.date,
+    row.pick,
+    row.result,
+    row.hr
+  ));
+
+  await copyText(
+    rowsToTsvWithColumns(HR_DEBUG_COLUMNS, rows),
+    'Copied HR debug rows. Paste them into a separate Google Sheets tab for tuning.'
+  );
+}
+
 window.saveCurrentHrPicks = saveCurrentHrPicks;
 window.copyHrPicksForSheets = copyHrPicksForSheets;
 window.checkSavedHrPicks = checkSavedHrPicks;
 window.copyHrResultsForSheets = copyHrResultsForSheets;
+window.copyCompletedHrRowsForSheets = copyCompletedHrRowsForSheets;
+window.copyHrDebugRowsForSheets = copyHrDebugRowsForSheets;
 
 async function main() {
   const date = todayStr();
   const startDate = recentStartDate(15);
   document.getElementById('date-label').textContent = formatDate(date);
+  setUpdatedAt();
 
   let games;
   try {
@@ -1161,14 +1558,15 @@ async function main() {
     if (g.teams?.home?.probablePitcher?.id) pitcherIds.add(g.teams.home.probablePitcher.id);
     if (g.teams?.away?.probablePitcher?.id) pitcherIds.add(g.teams.away.probablePitcher.id);
     const sides = [
-      { players: g.lineups.awayPlayers, team: g.teams?.away?.team?.name ?? 'Away', pitcher: g.teams?.home?.probablePitcher },
-      { players: g.lineups.homePlayers, team: g.teams?.home?.team?.name ?? 'Home', pitcher: g.teams?.away?.probablePitcher },
+      { side: 'away', players: g.lineups.awayPlayers, team: g.teams?.away?.team?.name ?? 'Away', pitcher: g.teams?.home?.probablePitcher },
+      { side: 'home', players: g.lineups.homePlayers, team: g.teams?.home?.team?.name ?? 'Home', pitcher: g.teams?.away?.probablePitcher },
     ];
-    for (const { players, team, pitcher } of sides) {
+    for (const { side, players, team, pitcher } of sides) {
       players.forEach((p, idx) => {
         batterIds.add(p.id);
         lineupEntries.push({
           id: p.id,
+          side,
           name: p.fullName,
           team,
           lineupPos: idx + 1,
@@ -1212,9 +1610,10 @@ async function main() {
     if (!batter || batter.pa < MODEL.minBatterPa || !meta.pitcher) continue;
     const pitcher = pitcherInfo[meta.pitcher.id];
     if (!pitcher) continue;
-    const s = score(batter, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos);
+    const s = score(batter, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos, 1.0, meta.side === 'away');
     candidates.push({
       batterId: meta.id,
+      side: meta.side,
       batterName: meta.name,
       batterTeam: meta.team,
       pitcherId: meta.pitcher.id,
@@ -1233,10 +1632,24 @@ async function main() {
     });
   }
 
+  const gameEnvFactors = hrGameEnvironmentFactors(candidates);
+  for (const pick of candidates) {
+    const gameEnvFactor = gameEnvFactors.get(pick.gamePk) ?? 1.0;
+    Object.assign(pick, score(
+      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, gameEnvFactor, pick.side === 'away'
+    ));
+  }
   candidates.sort((a, b) => b.prob - a.prob);
   const top30 = candidates.slice(0, 30);
 
   setStage('Checking recent power...');
+  const pitcherRecent = new Map();
+  await Promise.all(
+    [...new Set(top30.map(p => p.pitcherId).filter(Boolean))].map(async pid => {
+      pitcherRecent.set(pid, await getPitcherRecentHrRisk(pid));
+    })
+  );
+
   await Promise.all(top30.map(async pick => {
     const recent = await getBatterRecentPower(pick.batterId, startDate, date);
     if (recent) {
@@ -1245,8 +1658,15 @@ async function main() {
       pick.batter.recentHrPerPa = recent.hrPerPa;
       pick.batter.recentSlg = recent.slg;
     }
+    const pitcherRecentHr = pitcherRecent.get(pick.pitcherId);
+    if (pitcherRecentHr) {
+      pick.pitcher.recentHr9 = pitcherRecentHr.hr9;
+      pick.pitcher.recentHrIp = pitcherRecentHr.ip;
+      pick.pitcher.recentHr = pitcherRecentHr.hr;
+    }
+    const gameEnvFactor = gameEnvFactors.get(pick.gamePk) ?? 1.0;
     Object.assign(pick, score(
-      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos
+      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, gameEnvFactor, pick.side === 'away'
     ));
   }));
 
@@ -1261,6 +1681,7 @@ async function main() {
 
   currentHrDate = date;
   currentHrPicks = topPicks;
+  autoSaveCurrentHrPicks();
 
   show(
     renderSummary(topPicks) +

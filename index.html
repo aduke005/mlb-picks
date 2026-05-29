@@ -69,6 +69,31 @@ h1 {
   background: var(--inset);
 }
 
+.top-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 8px;
+}
+
+.top-refresh {
+  width: 38px;
+  height: 32px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--blue);
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.updated-at {
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 5px;
+  min-height: 1em;
+}
+
 /* ---- Cards ---- */
 .card {
   background: var(--surface);
@@ -134,6 +159,16 @@ h1 {
 
 .matchup-line { font-size: 0.85rem; color: var(--text); margin-bottom: 2px; }
 .game-time    { font-size: 0.75rem; color: var(--muted); margin-bottom: 10px; }
+.card-summary {
+  background: var(--inset);
+  border-left: 3px solid var(--blue);
+  border-radius: 8px;
+  padding: 9px 10px;
+  margin: 8px 0 10px;
+  color: var(--text);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
 
 /* ---- Stat rows ---- */
 .stat-group-label {
@@ -341,6 +376,10 @@ h1 {
   gap: 8px;
 }
 
+.tracker-actions button:last-child:nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
 .tracker button {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -445,6 +484,10 @@ footer {
     <a class="tab active" href="index.html">Hits</a>
     <a class="tab" href="hr.html">Home Runs</a>
   </nav>
+  <div class="top-actions">
+    <button class="top-refresh" onclick="refreshPage()" title="Refresh picks" aria-label="Refresh picks">↻</button>
+  </div>
+  <div class="updated-at" id="updated-at"></div>
 </header>
 
 <div id="app">
@@ -470,6 +513,7 @@ const WEATHER_KEY = null;
 const API    = 'https://statsapi.mlb.com/api/v1';
 const SEASON = new Date().getFullYear();
 const PICK_STORE_KEY = 'mlb-hit-picks-saved-v1';
+const PICK_HISTORY_KEY = 'mlb-hit-picks-history-v1';
 const PAGE_CACHE_KEY = 'mlb-hit-picks-page-cache-v1';
 const PAGE_CACHE_TTL = 15 * 60 * 1000;
 
@@ -582,6 +626,38 @@ function shrink(value, baseline, sample, prior) {
   return ((value * n) + (baseline * prior)) / (n + prior);
 }
 
+function splitKeyForHand(hand) {
+  return hand === 'L' ? 'vl' : 'vr';
+}
+
+function parseSplitStats(d) {
+  const out = {};
+  for (const split of d.stats?.[0]?.splits || []) {
+    const code = split.split?.code;
+    const s = split.stat || {};
+    if (!code) continue;
+    const pa = parseInt(s.plateAppearances || s.battersFaced || s.atBats || '0', 10);
+    const ab = parseInt(s.atBats || '0', 10);
+    const hits = parseInt(s.hits || '0', 10);
+    const so = parseInt(s.strikeOuts || '0', 10);
+    const hr = parseInt(s.homeRuns || '0', 10);
+    out[code] = {
+      pa,
+      ab,
+      hits,
+      hr,
+      avg: parseFloat(s.avg || '0'),
+      ops: parseFloat(s.ops || '0'),
+      slg: parseFloat(s.slg || '0'),
+      whip: parseFloat(s.whip || String(LEAGUE.whip)),
+      kPct: pa > 0 ? so / pa : LEAGUE.kPct,
+      hPerPa: pa > 0 ? hits / pa : LEAGUE.hPerPa,
+      hrPerPa: pa > 0 ? hr / pa : 0,
+    };
+  }
+  return out;
+}
+
 function todayStr() { return new Date().toLocaleDateString('en-CA'); }
 
 function recentStartDate(days = 15) {
@@ -630,6 +706,16 @@ function setStage(msg) {
   if (el) el.textContent = msg;
 }
 
+function setUpdatedAt(value = new Date()) {
+  const el = document.getElementById('updated-at');
+  if (!el) return;
+  el.textContent = `Updated ${value.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  })}`;
+}
+
 // ─── MLB API ──────────────────────────────────────────────────────────────────
 
 async function getSchedule(date) {
@@ -662,9 +748,10 @@ async function getPersonInfo(id) {
 // Season stats + handedness in two parallel calls
 async function getPitcherInfo(id) {
   try {
-    const [sd, pd] = await Promise.all([
+    const [sd, pd, sp] = await Promise.all([
       fetchJSON(`${API}/people/${id}/stats?stats=season&season=${SEASON}&group=pitching`),
       getPersonInfo(id),
+      fetchJSON(`${API}/people/${id}/stats?stats=statSplits&season=${SEASON}&group=pitching&sitCodes=vl,vr`),
     ]);
     const s  = sd.stats?.[0]?.splits?.[0]?.stat || {};
     const ip = parseFloat(s.inningsPitched || '0');
@@ -675,6 +762,7 @@ async function getPitcherInfo(id) {
       whip: parseFloat(s.whip  || String(LEAGUE.whip)),
       k9:   ip > 0 ? (parseInt(s.strikeOuts || '0') / ip * 9) : LEAGUE.k9,
       ip,
+      splits: parseSplitStats(sp),
     };
   } catch {
     return { hand: 'R', obaa: LEAGUE.ba, era: LEAGUE.era, whip: LEAGUE.whip, k9: LEAGUE.k9, ip: 0 };
@@ -684,9 +772,10 @@ async function getPitcherInfo(id) {
 // Season hitting stats
 async function getBatterStats(id) {
   try {
-    const d = await fetchJSON(
-      `${API}/people/${id}/stats?stats=season&season=${SEASON}&group=hitting`
-    );
+    const [d, sp] = await Promise.all([
+      fetchJSON(`${API}/people/${id}/stats?stats=season&season=${SEASON}&group=hitting`),
+      fetchJSON(`${API}/people/${id}/stats?stats=statSplits&season=${SEASON}&group=hitting&sitCodes=vl,vr,a`),
+    ]);
     const s = d.stats?.[0]?.splits?.[0]?.stat;
     if (!s) return null;
     const ab = parseInt(s.atBats          || '0', 10);
@@ -703,6 +792,7 @@ async function getBatterStats(id) {
       hits: h,
       hPerPa: pa > 0 ? h / pa : LEAGUE.hPerPa,
       kPct: pa > 0 ? so / pa : LEAGUE.kPct,
+      splits: parseSplitStats(sp),
     };
   } catch { return null; }
 }
@@ -762,18 +852,25 @@ function windFactor(wind) {
 
 // ─── Scoring ──────────────────────────────────────────────────────────────────
 //
-// P(hit per PA) = batterBase × pitcherWeakness × platoon × park × wind
+// P(hit per PA) = batterBase × pitcherWeakness × platoon × park × gameEnv × wind
 // P(≥1 hit)    = 1 − (1 − pHit)^expectedPAs
 //
 // batterBase = season_BA × opsAdj × recentAdj × contactAdj
 //
 // pitcherWeakness (>1 = easier than league avg):
-//   oBAA × 0.30 + ERA × 0.20 + WHIP × 0.20 + K9(inv) × 0.15 + recentERA × 0.15
+//   oBAA × 0.40 + K9(inv) × 0.25 + WHIP × 0.14 + ERA × 0.11 + recentERA × 0.10
 
 function expectedPAs(lineupPos) {
   // 1-indexed batting order position
   const table = [4.7, 4.5, 4.3, 4.1, 4.0, 3.9, 3.8, 3.6, 3.5];
   return table[clamp(lineupPos - 1, 0, 8)];
+}
+
+function ttoFactor(lineupPos) {
+  if (lineupPos <= 2) return 1.025;
+  if (lineupPos <= 4) return 1.015;
+  if (lineupPos <= 6) return 1.005;
+  return 1.0;
 }
 
 function calibrateProbability(rawProb, ePAs) {
@@ -785,22 +882,52 @@ function calibrateProbability(rawProb, ePAs) {
   );
 }
 
-function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind) {
+function average(values) {
+  const nums = values.filter(v => Number.isFinite(v));
+  if (!nums.length) return null;
+  return nums.reduce((sum, v) => sum + v, 0) / nums.length;
+}
+
+function hitGameEnvironmentFactors(candidates) {
+  const grouped = new Map();
+  for (const pick of candidates) {
+    if (!grouped.has(pick.gamePk)) grouped.set(pick.gamePk, []);
+    grouped.get(pick.gamePk).push(pick);
+  }
+
+  const factors = new Map();
+  for (const [gamePk, picks] of grouped.entries()) {
+    const avgEnv = average(picks.map(p => p.pitcherWeakness * p.parkFactor));
+    factors.set(gamePk, avgEnv == null ? 1.0 : clamp(shrink(avgEnv, 1.0, picks.length, 12), 0.94, 1.06));
+  }
+  return factors;
+}
+
+function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind, gameEnvFactor = 1.0, isAway = false) {
   const { hand: pitcherHand, obaa, era, whip, k9, recentERA } = pitcher;
 
   const platoonKey  = `${batterHand}v${pitcherHand}`;
   const platoon     = PLATOON[platoonKey] ?? 1.0;
+  const matchupBatterHand = batterHand === 'S'
+    ? (pitcherHand === 'L' ? 'R' : 'L')
+    : batterHand;
+  const batterSplit = batter.splits?.[splitKeyForHand(pitcherHand)] || null;
+  const pitcherSplit = pitcher.splits?.[splitKeyForHand(matchupBatterHand)] || null;
+  const awaySplit = isAway ? batter.splits?.a || null : null;
 
   // Batter factors
+  const splitHPerPa = batterSplit
+    ? shrink(batterSplit.hPerPa || LEAGUE.hPerPa, batter.hPerPa || LEAGUE.hPerPa, batterSplit.pa, 120)
+    : (batter.hPerPa || LEAGUE.hPerPa);
   const seasonHPerPa = shrink(
-    batter.hPerPa || LEAGUE.hPerPa,
+    splitHPerPa,
     LEAGUE.hPerPa,
-    batter.pa || batter.ab || 0,
+    Math.max(batter.pa || batter.ab || 0, batterSplit?.pa || 0),
     MODEL.batterPaPrior
   );
   const opsAdj = clamp(
-    1 + 0.08 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
-    0.85, 1.18
+    1 + 0.14 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
+    0.82, 1.25
   );
   const recentRate = batter.recentHPerPa != null
     ? shrink(batter.recentHPerPa, seasonHPerPa, batter.recentPa || 0, MODEL.recentAbPrior)
@@ -812,36 +939,51 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind) {
     (1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct),
     0.88, 1.12
   );
+  const awayRate = awaySplit
+    ? shrink(awaySplit.hPerPa || LEAGUE.hPerPa, batter.hPerPa || LEAGUE.hPerPa, awaySplit.pa, 140)
+    : null;
+  const awayAdj = awayRate != null
+    ? clamp(1 + 0.35 * (awayRate - (batter.hPerPa || LEAGUE.hPerPa)) / Math.max(batter.hPerPa || LEAGUE.hPerPa, 0.05), 0.93, 1.07)
+    : 1.0;
 
-  const batterBase = seasonHPerPa * opsAdj * recentAdj * contactAdj;
+  const batterBase = seasonHPerPa * opsAdj * recentAdj * contactAdj * awayAdj;
 
   // Pitcher weakness relative to league (each ratio > 1 = easier to hit)
+  const splitObaa = pitcherSplit
+    ? shrink(pitcherSplit.avg || LEAGUE.ba, obaa || LEAGUE.ba, pitcherSplit.pa, 120)
+    : obaa;
+  const splitWhip = pitcherSplit
+    ? shrink(pitcherSplit.whip || LEAGUE.whip, whip || LEAGUE.whip, pitcherSplit.pa, 120)
+    : whip;
+  const splitK9 = pitcherSplit?.pa
+    ? clamp(k9 * ((1 - LEAGUE.kPct) / Math.max(1 - pitcherSplit.kPct, 0.35)), 3, 16)
+    : k9;
   const recentERAVal = recentERA != null
     ? shrink(recentERA, era || LEAGUE.era, pitcher.recentIp || 0, 18)
     : era;
   const rawPitcherWeakness = clamp(
-    (obaa          / LEAGUE.ba)   * 0.40 +
-    (LEAGUE.k9     / Math.max(k9, 1)) * 0.25 +
-    (whip          / LEAGUE.whip) * 0.14 +
+    (splitObaa     / LEAGUE.ba)   * 0.40 +
+    (LEAGUE.k9     / Math.max(splitK9, 1)) * 0.25 +
+    (splitWhip     / LEAGUE.whip) * 0.14 +
     (era           / LEAGUE.era)  * 0.11 +
     (recentERAVal  / LEAGUE.era)  * 0.10,
     0.65, 1.55
   );
   const pitcherWeakness = clamp(
-    shrink(rawPitcherWeakness, 1.0, pitcher.ip || 0, MODEL.pitcherIpPrior),
+    shrink(rawPitcherWeakness, 1.0, pitcher.ip || 0, MODEL.pitcherIpPrior) * ttoFactor(lineupPos),
     0.78, 1.35
   );
 
   const wf    = windFactor(wind);
-  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkFactor * wf, 0.04, MODEL.maxPerPaHit);
+  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkFactor * wf * gameEnvFactor, 0.04, MODEL.maxPerPaHit);
   const ePAs  = expectedPAs(lineupPos);
   const rawProb = 1 - Math.pow(1 - pHit, ePAs);
   const prob = calibrateProbability(rawProb, ePAs);
 
   return {
     prob, rawProb, pHit, seasonHPerPa, platoon, pitcherWeakness, parkFactor, wf,
-    opsAdj, recentAdj, contactAdj, ePAs,
-    batterHand, pitcherHand,
+    opsAdj, recentAdj, contactAdj, awayAdj, ttoAdj: ttoFactor(lineupPos), gameEnvFactor, ePAs,
+    batterHand, pitcherHand, batterSplit, pitcherSplit, awaySplit, isAway,
   };
 }
 
@@ -883,6 +1025,28 @@ function windDesc(wf, wind) {
   const mph  = Math.round(wind.speed);
   const effect = wf > 1.02 ? 'blowing out' : wf < 0.98 ? 'blowing in' : 'crosswind';
   return `${mph} mph ${dir} — ${effect}`;
+}
+
+function joinReasons(reasons) {
+  if (reasons.length <= 1) return reasons.join('');
+  return `${reasons.slice(0, -1).join(', ')} and ${reasons[reasons.length - 1]}`;
+}
+
+function hitPickSummary(pick) {
+  const reasons = [];
+  if (pick.lineupPos <= 3) reasons.push('he bats near the top, so he should get more chances');
+  if (pick.pitcherWeakness > 1.06) reasons.push('the opposing pitcher looks hittable');
+  if (pick.contactAdj > 1.03) reasons.push('he avoids strikeouts well');
+  if (pick.recentAdj > 1.03) reasons.push('he has been hitting well lately');
+  if (pick.platoon > 1.02) reasons.push('the handedness matchup helps him');
+  if (pick.parkFactor > 1.03) reasons.push('the ballpark favors hitters');
+  if (pick.isAway && pick.awayAdj > 1.015) reasons.push('his road hitting profile travels well');
+  if (pick.isAway && pick.awayAdj < 0.985) reasons.push('his road hitting profile is a small concern');
+  if (pick.ttoAdj > 1.01) reasons.push('his lineup spot gives him a better shot at seeing a tiring starter');
+  if (pick.gameEnvFactor > 1.015) reasons.push('this specific game looks hitter-friendly overall');
+  if (pick.gameEnvFactor < 0.985) reasons.push('this specific game looks tougher for hits overall');
+  if (!reasons.length) reasons.push('his overall hit profile grades out well compared with the slate');
+  return `Why this pick: ${joinReasons(reasons)}.`;
 }
 
 function renderCard(pick, rank) {
@@ -928,6 +1092,7 @@ function renderCard(pick, rank) {
   <div class="matchup-line">vs ${pick.pitcherName} (${pick.pitcherHand === 'L' ? 'lefty pitcher' : 'righty pitcher'})</div>
   <div class="game-time">${pick.gameTime} · ${pick.venue}</div>
   ${pick.statusNote ? `<div class="status-alert">${pick.statusNote}</div>` : ''}
+  <div class="card-summary">${hitPickSummary(pick)}</div>
 
   <div class="stat-group-label">Hitter</div>
   <div class="stats-row">
@@ -990,9 +1155,22 @@ function renderCard(pick, rank) {
       <span class="factor-name">Ballpark: ${parkName}</span>
       <span class="factor-val ${fcls(pick.parkFactor)}">${parkLabel} ${farrow(pick.parkFactor)}</span>
     </div>
+    ${pick.isAway ? `
+    <div class="factor">
+      <span class="factor-name">Road hitting profile</span>
+      <span class="factor-val ${fcls(pick.awayAdj)}">${farrow(pick.awayAdj)}</span>
+    </div>` : ''}
+    <div class="factor">
+      <span class="factor-name">This game's hit environment</span>
+      <span class="factor-val ${fcls(pick.gameEnvFactor)}">${farrow(pick.gameEnvFactor)}</span>
+    </div>
     <div class="factor">
       <span class="factor-name">Batting order #${pick.lineupPos} (~${pick.ePAs.toFixed(1)} trips)</span>
       <span class="factor-val ${pick.lineupPos <= 3 ? 'good' : pick.lineupPos >= 7 ? 'neutral' : 'neutral'}">${pick.lineupPos <= 3 ? 'More chances' : 'Typical chances'}</span>
+    </div>
+    <div class="factor">
+      <span class="factor-name">Starter fatigue chance</span>
+      <span class="factor-val ${fcls(pick.ttoAdj)}">${farrow(pick.ttoAdj)}</span>
     </div>
     ${wDesc ? `
     <div class="factor">
@@ -1020,17 +1198,49 @@ function renderSummary(picks) {
 
 function getSavedPicks() {
   try {
-    return JSON.parse(localStorage.getItem(PICK_STORE_KEY) || 'null');
+    const history = getPickHistory();
+    const fromHistory = pickSavedPayload(history, true);
+    return fromHistory || JSON.parse(localStorage.getItem(PICK_STORE_KEY) || 'null');
   } catch {
     return null;
   }
+}
+
+function getPickHistory() {
+  try {
+    return JSON.parse(localStorage.getItem(PICK_HISTORY_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function pickSavedPayload(history, preferPastDate = false) {
+  const values = Object.values(history || {}).filter(p => p?.date && p?.picks?.length);
+  if (!values.length) return null;
+  values.sort((a, b) => b.date.localeCompare(a.date));
+  if (preferPastDate) {
+    const today = todayStr();
+    return values.find(p => p.date < today) || values[0];
+  }
+  return values[0];
+}
+
+function storePickPayload(payload) {
+  const history = getPickHistory();
+  history[payload.date] = payload;
+  localStorage.setItem(PICK_HISTORY_KEY, JSON.stringify(history));
+  localStorage.setItem(PICK_STORE_KEY, JSON.stringify(payload));
+}
+
+function hasSavedPicksForDate(date) {
+  return !!getPickHistory()[date];
 }
 
 function renderPickTracker() {
   const saved = getSavedPicks();
   const savedText = saved
     ? `Saved ${saved.picks.length} picks for ${formatDate(saved.date)}. This browser remembers the latest saved day.`
-    : 'Save today\'s list, then come back after the games finish to check those exact picks.';
+    : 'The first loaded list auto-saves for tracking. Use Save only if you want to replace it.';
 
   return `
 <div class="tracker">
@@ -1040,9 +1250,66 @@ function renderPickTracker() {
     <button onclick="copyPicksForSheets()">Copy picks for Sheets</button>
     <button onclick="checkSavedPicks()">Check saved picks</button>
     <button onclick="copyResultsForSheets()">Copy result columns</button>
+    <button onclick="copyCompletedRowsForSheets()">Copy completed rows</button>
+    <button onclick="copyDebugRowsForSheets()">Copy debug rows</button>
   </div>
   <div class="tracker-output" id="tracker-output">${savedText}</div>
 </div>`;
+}
+
+function limitSameGameAndTeam(picks, limit = 2) {
+  const gameCounts = new Map();
+  const teamCounts = new Map();
+  const selected = [];
+
+  for (const pick of picks) {
+    const gameKey = pick.gamePk;
+    const teamKey = pick.batterTeam;
+    if ((gameCounts.get(gameKey) || 0) >= limit) continue;
+    if ((teamCounts.get(teamKey) || 0) >= limit) continue;
+    selected.push(pick);
+    gameCounts.set(gameKey, (gameCounts.get(gameKey) || 0) + 1);
+    teamCounts.set(teamKey, (teamCounts.get(teamKey) || 0) + 1);
+    if (selected.length >= 7) break;
+  }
+
+  return selected;
+}
+
+function pickPayload(pick, idx) {
+  return {
+    rank: idx + 1,
+    gamePk: pick.gamePk,
+    side: pick.side,
+    batterId: pick.batterId,
+    batterName: pick.batterName,
+    batterTeam: pick.batterTeam,
+    pitcherName: pick.pitcherName,
+    pitcherHand: pick.pitcherHand,
+    lineupPos: pick.lineupPos,
+    prob: pick.prob,
+    rawProb: pick.rawProb,
+    pHit: pick.pHit,
+    pitcherWeakness: pick.pitcherWeakness,
+    platoon: pick.platoon,
+    awayAdj: pick.awayAdj,
+    ttoAdj: pick.ttoAdj,
+    gameEnvFactor: pick.gameEnvFactor,
+    parkFactor: pick.parkFactor,
+    recentAdj: pick.recentAdj,
+    contactAdj: pick.contactAdj,
+    opsAdj: pick.opsAdj,
+    gameTime: pick.gameTime,
+    venue: pick.venue,
+  };
+}
+
+function currentPickPayload() {
+  return {
+    date: currentPickDate,
+    savedAt: new Date().toISOString(),
+    picks: currentTopPicks.map(pickPayload),
+  };
 }
 
 function saveCurrentPicks() {
@@ -1052,31 +1319,17 @@ function saveCurrentPicks() {
     return;
   }
 
-  const payload = {
-    date: currentPickDate,
-    savedAt: new Date().toISOString(),
-    picks: currentTopPicks.map((pick, idx) => ({
-      rank: idx + 1,
-      gamePk: pick.gamePk,
-      side: pick.side,
-      batterId: pick.batterId,
-      batterName: pick.batterName,
-      batterTeam: pick.batterTeam,
-      pitcherName: pick.pitcherName,
-      pitcherHand: pick.pitcherHand,
-      lineupPos: pick.lineupPos,
-      prob: pick.prob,
-      rawProb: pick.rawProb,
-      pHit: pick.pHit,
-      gameTime: pick.gameTime,
-      venue: pick.venue,
-    })),
-  };
-
-  localStorage.setItem(PICK_STORE_KEY, JSON.stringify(payload));
+  const payload = currentPickPayload();
+  storePickPayload(payload);
   lastCheckedPickRows = null;
   if (out) out.textContent = `Saved ${payload.picks.length} picks for ${formatDate(payload.date)}. Come back after the games finish and tap "Check saved picks."`;
   savePageCache();
+}
+
+function autoSaveCurrentPicks() {
+  if (!currentPickDate || !currentTopPicks.length) return;
+  if (hasSavedPicksForDate(currentPickDate)) return;
+  storePickPayload(currentPickPayload());
 }
 
 const SHEET_COLUMNS = [
@@ -1096,6 +1349,32 @@ const SHEET_COLUMNS = [
   'At-Bats',
 ];
 
+const DEBUG_COLUMNS = [
+  'Date',
+  'Rank',
+  'Player',
+  'Team',
+  'Chance',
+  'Result',
+  'Outcome',
+  'Hits',
+  'At-Bats',
+  'Single-trip Hit Rate',
+  'Pitcher Weakness',
+  'Handedness',
+  'Road Adj',
+  'TTO Adj',
+  'Game Env',
+  'Park',
+  'Recent Adj',
+  'Contact Adj',
+  'OPS Adj',
+  'Batting Order',
+  'Pitcher',
+  'Pitcher Hand',
+  'Venue',
+];
+
 function pctText(value) {
   return `${Math.round((value || 0) * 100)}%`;
 }
@@ -1108,6 +1387,10 @@ function rowsToTsv(rows, includeHeader = true) {
   const lines = includeHeader ? [SHEET_COLUMNS] : [];
   lines.push(...rows);
   return lines.map(row => row.map(tsvCell).join('\t')).join('\n');
+}
+
+function rowsToTsvWithColumns(columns, rows) {
+  return [columns, ...rows].map(row => row.map(tsvCell).join('\t')).join('\n');
 }
 
 function savedPickToSheetRow(date, pick, result = '', hits = '', atBats = '') {
@@ -1126,6 +1409,39 @@ function savedPickToSheetRow(date, pick, result = '', hits = '', atBats = '') {
     result,
     hits,
     atBats,
+  ];
+}
+
+function decText(value, places = 3) {
+  return value == null || value === '' || isNaN(value) ? '' : Number(value).toFixed(places);
+}
+
+function savedPickToDebugRow(date, pick, result = '', hits = '', atBats = '') {
+  const outcome = result === 'Hit' ? 1 : result === 'Miss' ? 0 : '';
+  return [
+    date,
+    pick.rank,
+    pick.batterName,
+    pick.batterTeam,
+    pctText(pick.prob),
+    result,
+    outcome,
+    hits,
+    atBats,
+    decText(pick.pHit),
+    decText(pick.pitcherWeakness),
+    decText(pick.platoon),
+    decText(pick.awayAdj),
+    decText(pick.ttoAdj),
+    decText(pick.gameEnvFactor),
+    decText(pick.parkFactor),
+    decText(pick.recentAdj),
+    decText(pick.contactAdj),
+    decText(pick.opsAdj),
+    pick.lineupPos,
+    pick.pitcherName,
+    pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
+    pick.venue,
   ];
 }
 
@@ -1249,10 +1565,84 @@ async function copyResultsForSheets() {
   );
 }
 
+async function getSavedRowsWithResults() {
+  const saved = getSavedPicks();
+  if (!saved?.picks?.length) return null;
+
+  const boxscores = new Map();
+  await Promise.all([...new Set(saved.picks.map(p => p.gamePk).filter(Boolean))].map(async gamePk => {
+    boxscores.set(gamePk, await getBoxscore(gamePk));
+  }));
+
+  const rows = saved.picks.map(pick => {
+    const box = boxscores.get(pick.gamePk);
+    const player = Object.values(box?.teams?.[pick.side]?.players || {})
+      .find(p => p.person?.id === pick.batterId);
+    const batting = player?.stats?.batting;
+    const hits = batting?.hits ?? '';
+    const atBats = batting?.atBats ?? '';
+    return {
+      pick,
+      status: batting ? 'final' : 'pending',
+      result: batting ? (hits > 0 ? 'Hit' : 'Miss') : 'Pending',
+      hits,
+      atBats,
+    };
+  });
+
+  return { saved, rows };
+}
+
+async function copyCompletedRowsForSheets() {
+  const out = document.getElementById('tracker-output');
+  const data = await getSavedRowsWithResults();
+  if (!data) {
+    if (out) out.textContent = 'No saved picks yet.';
+    return;
+  }
+
+  const rows = data.rows.map(row => savedPickToSheetRow(
+    data.saved.date,
+    row.pick,
+    row.result,
+    row.hits,
+    row.atBats
+  ));
+
+  await copyText(
+    rowsToTsv(rows),
+    'Copied completed rows. Paste them into Google Sheets as new rows.'
+  );
+}
+
+async function copyDebugRowsForSheets() {
+  const out = document.getElementById('tracker-output');
+  const data = await getSavedRowsWithResults();
+  if (!data) {
+    if (out) out.textContent = 'No saved picks yet.';
+    return;
+  }
+
+  const rows = data.rows.map(row => savedPickToDebugRow(
+    data.saved.date,
+    row.pick,
+    row.result,
+    row.hits,
+    row.atBats
+  ));
+
+  await copyText(
+    rowsToTsvWithColumns(DEBUG_COLUMNS, rows),
+    'Copied hit debug rows. Paste them into a separate Google Sheets tab for tuning.'
+  );
+}
+
 window.saveCurrentPicks = saveCurrentPicks;
 window.checkSavedPicks = checkSavedPicks;
 window.copyPicksForSheets = copyPicksForSheets;
 window.copyResultsForSheets = copyResultsForSheets;
+window.copyCompletedRowsForSheets = copyCompletedRowsForSheets;
+window.copyDebugRowsForSheets = copyDebugRowsForSheets;
 
 function renderBacktestPanel(defaultDate = addDays(todayStr(), -1)) {
   return `
@@ -1264,6 +1654,7 @@ function renderBacktestPanel(defaultDate = addDays(todayStr(), -1)) {
   </div>
   <div class="backtest-output" id="backtest-output">
     Scores completed games for one prior date and compares prediction buckets to boxscores.
+    Uses date-limited season totals; historical handedness splits are skipped because the MLB split endpoint is not date-limited.
   </div>
 </div>`;
 }
@@ -1280,6 +1671,7 @@ function renderBacktestResult(result) {
     <div><strong>${formatDate(result.date)}</strong></div>
     <div>${result.picks} batter-game picks across ${result.games} completed games.</div>
     <div>Brier score: ${result.brier.toFixed(3)} - Overall hit rate: ${Math.round(result.hitRate * 100)}%</div>
+    <div>Note: date-limited backtests skip handedness splits because MLB split stats are season-current only.</div>
     <div style="margin-top:8px">${bucketRows}</div>`;
 }
 
@@ -1298,9 +1690,10 @@ async function getBoxscore(gamePk) {
 async function getBatterStatsThroughDate(id, endDate) {
   try {
     const season = new Date(endDate + 'T12:00:00').getFullYear();
+    const startDate = `${season}-03-01`;
     const d = await fetchJSON(
       `${API}/people/${id}/stats?stats=byDateRange&season=${season}&group=hitting` +
-      `&startDate=${season}-03-01&endDate=${endDate}`
+      `&startDate=${startDate}&endDate=${endDate}`
     );
     const s = d.stats?.[0]?.splits?.[0]?.stat;
     if (!s) return null;
@@ -1323,8 +1716,9 @@ async function getBatterStatsThroughDate(id, endDate) {
 async function getPitcherInfoThroughDate(id, endDate) {
   try {
     const season = new Date(endDate + 'T12:00:00').getFullYear();
+    const startDate = `${season}-03-01`;
     const [sd, pd] = await Promise.all([
-      fetchJSON(`${API}/people/${id}/stats?stats=byDateRange&season=${season}&group=pitching&startDate=${season}-03-01&endDate=${endDate}`),
+      fetchJSON(`${API}/people/${id}/stats?stats=byDateRange&season=${season}&group=pitching&startDate=${startDate}&endDate=${endDate}`),
       getPersonInfo(id),
     ]);
     const s  = sd.stats?.[0]?.splits?.[0]?.stat || {};
@@ -1394,6 +1788,19 @@ async function runBacktest() {
       hands[id] = hand;
     }));
 
+    const preScores = [];
+    for (const e of entries) {
+      const batter = batters[e.id];
+      const pitcher = pitchers[e.pitcher?.id];
+      if (!batter || batter.pa < MODEL.minBatterPa || !pitcher) continue;
+      preScores.push({
+        gamePk: e.gamePk,
+        parkFactor: e.parkFactor,
+        ...score(batter, pitcher, e.parkFactor, hands[e.id] || 'R', e.lineupPos, null, 1.0, e.side === 'away'),
+      });
+    }
+    const gameEnvFactors = hitGameEnvironmentFactors(preScores);
+
     const boxscores = new Map();
     await Promise.all(games.map(async g => {
       boxscores.set(g.gamePk, await getBoxscore(g.gamePk));
@@ -1408,7 +1815,8 @@ async function runBacktest() {
       const batter = batters[e.id];
       const pitcher = pitchers[e.pitcher?.id];
       if (!batter || batter.pa < MODEL.minBatterPa || !pitcher) continue;
-      const s = score(batter, pitcher, e.parkFactor, hands[e.id] || 'R', e.lineupPos, null);
+      const gameEnvFactor = gameEnvFactors.get(e.gamePk) ?? 1.0;
+      const s = score(batter, pitcher, e.parkFactor, hands[e.id] || 'R', e.lineupPos, null, gameEnvFactor, e.side === 'away');
       const boxPlayer = Object.values(boxscores.get(e.gamePk)?.teams?.[e.side]?.players || {})
         .find(p => p.person?.id === e.id);
       if (!boxPlayer?.stats?.batting) continue;
@@ -1448,6 +1856,7 @@ async function main() {
   const startDate = recentStartDate(15);
 
   document.getElementById('date-label').textContent = formatDate(date);
+  setUpdatedAt();
 
   let games;
   try {
@@ -1566,7 +1975,7 @@ async function main() {
     if (!pitcher) continue;
 
     const s = score(
-      bs, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos, null
+      bs, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos, null, 1.0, meta.side === 'away'
     );
 
     candidates.push({
@@ -1591,6 +2000,13 @@ async function main() {
     });
   }
 
+  const gameEnvFactors = hitGameEnvironmentFactors(candidates);
+  for (const pick of candidates) {
+    const gameEnvFactor = gameEnvFactors.get(pick.gamePk) ?? 1.0;
+    Object.assign(pick, score(
+      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, null, gameEnvFactor, pick.side === 'away'
+    ));
+  }
   candidates.sort((a, b) => b.prob - a.prob);
   const top30 = candidates.slice(0, 30);
 
@@ -1627,13 +2043,14 @@ async function main() {
       pick.pitcher.recentIp = recent?.ip ?? 0;
     }
     const wind = null; // fetched per-venue below for final top 6
+    const gameEnvFactor = gameEnvFactors.get(pick.gamePk) ?? 1.0;
     Object.assign(pick, score(
-      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, wind
+      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, wind, gameEnvFactor, pick.side === 'away'
     ));
   }
 
   top30.sort((a, b) => b.prob - a.prob);
-  const topPicks = top30.slice(0, 7);
+  const topPicks = limitSameGameAndTeam(top30, 2);
 
   if (!topPicks.length) {
     show(
@@ -1654,8 +2071,9 @@ async function main() {
     }));
     for (const pick of topPicks) {
       pick.wind = windMap[pick.homeTeamId] ?? null;
+      const gameEnvFactor = gameEnvFactors.get(pick.gamePk) ?? 1.0;
       Object.assign(pick, score(
-        pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, pick.wind
+        pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, pick.wind, gameEnvFactor, pick.side === 'away'
       ));
     }
     topPicks.sort((a, b) => b.prob - a.prob);
@@ -1665,6 +2083,7 @@ async function main() {
 
   currentPickDate = date;
   currentTopPicks = topPicks;
+  autoSaveCurrentPicks();
 
   show(
     renderSummary(topPicks) +
@@ -1703,6 +2122,7 @@ function savePageCache() {
       savedAt: Date.now(),
       appHtml: document.getElementById('app')?.innerHTML || '',
       dateLabel: document.getElementById('date-label')?.textContent || '',
+      updatedAt: document.getElementById('updated-at')?.textContent || '',
       currentPickDate,
       currentTopPicks,
     }));
@@ -1715,6 +2135,7 @@ function restorePageCache() {
     if (!cached || Date.now() - cached.savedAt > PAGE_CACHE_TTL) return false;
     document.getElementById('app').innerHTML = cached.appHtml;
     document.getElementById('date-label').textContent = cached.dateLabel || 'Cached picks';
+    document.getElementById('updated-at').textContent = cached.updatedAt || '';
     currentPickDate = cached.currentPickDate || null;
     currentTopPicks = cached.currentTopPicks || [];
     return true;
