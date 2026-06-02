@@ -331,7 +331,7 @@ h1 {
   border-top: 1px solid var(--border);
 }
 
-.summary-row:first-of-type { border-top: 0; }
+.summary-title + .summary-row { border-top: 0; }
 
 .summary-rank {
   color: var(--muted);
@@ -515,11 +515,13 @@ const SEASON = new Date().getFullYear();
 const PICK_STORE_KEY = 'mlb-hit-picks-saved-v1';
 const PICK_HISTORY_KEY = 'mlb-hit-picks-history-v1';
 const PAGE_CACHE_KEY = 'mlb-hit-picks-page-cache-v1';
+const FORCE_REFRESH_KEY = 'mlb-hit-picks-force-refresh-v1';
 const PAGE_CACHE_TTL = 15 * 60 * 1000;
 
 let currentPickDate = null;
 let currentTopPicks = [];
 let lastCheckedPickRows = null;
+let lastCheckedPickDate = null;
 
 // League-average baselines for normalization
 const LEAGUE = {
@@ -926,18 +928,18 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind, gameEnv
     MODEL.batterPaPrior
   );
   const opsAdj = clamp(
-    1 + 0.14 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
-    0.82, 1.25
+    1 + 0.10 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
+    0.88, 1.18
   );
   const recentRate = batter.recentHPerPa != null
     ? shrink(batter.recentHPerPa, seasonHPerPa, batter.recentPa || 0, MODEL.recentAbPrior)
     : null;
   const recentAdj = recentRate != null
-    ? clamp(1 + 0.18 * (recentRate - seasonHPerPa) / Math.max(seasonHPerPa, 0.05), 0.88, 1.12)
+    ? clamp(1 + 0.12 * (recentRate - seasonHPerPa) / Math.max(seasonHPerPa, 0.05), 0.92, 1.08)
     : 1.0;
   const contactAdj = clamp(
     (1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct),
-    0.88, 1.12
+    0.92, 1.08
   );
   const awayRate = awaySplit
     ? shrink(awaySplit.hPerPa || LEAGUE.hPerPa, batter.hPerPa || LEAGUE.hPerPa, awaySplit.pa, 140)
@@ -995,7 +997,7 @@ function fmtAvg(n) {
 }
 
 function fmtNum(n, dec = 2) {
-  if (!n || isNaN(n)) return '—';
+  if (n == null || n === '' || isNaN(n)) return '—';
   return n.toFixed(dec);
 }
 
@@ -1196,16 +1198,6 @@ function renderSummary(picks) {
 </div>`;
 }
 
-function getSavedPicks() {
-  try {
-    const history = getPickHistory();
-    const fromHistory = pickSavedPayload(history, true);
-    return fromHistory || JSON.parse(localStorage.getItem(PICK_STORE_KEY) || 'null');
-  } catch {
-    return null;
-  }
-}
-
 function getPickHistory() {
   try {
     return JSON.parse(localStorage.getItem(PICK_HISTORY_KEY) || '{}');
@@ -1214,13 +1206,29 @@ function getPickHistory() {
   }
 }
 
-function pickSavedPayload(history, preferPastDate = false) {
+function getSavedPicksForDate(date) {
+  return getPickHistory()[date] || null;
+}
+
+function getLatestSavedPicks() {
+  return pickSavedPayload(getPickHistory());
+}
+
+function getLatestPastSavedPicks() {
+  return pickSavedPayload(getPickHistory(), { pastOnly: true });
+}
+
+function getSavedPicksForResults() {
+  return getLatestPastSavedPicks() || getLatestSavedPicks();
+}
+
+function pickSavedPayload(history, options = {}) {
   const values = Object.values(history || {}).filter(p => p?.date && p?.picks?.length);
   if (!values.length) return null;
   values.sort((a, b) => b.date.localeCompare(a.date));
-  if (preferPastDate) {
+  if (options.pastOnly) {
     const today = todayStr();
-    return values.find(p => p.date < today) || values[0];
+    return values.find(p => p.date < today) || null;
   }
   return values[0];
 }
@@ -1237,21 +1245,19 @@ function hasSavedPicksForDate(date) {
 }
 
 function renderPickTracker() {
-  const saved = getSavedPicks();
+  const saved = (currentPickDate && getSavedPicksForDate(currentPickDate)) || getSavedPicksForResults();
   const savedText = saved
     ? `Saved ${saved.picks.length} picks for ${formatDate(saved.date)}. This browser remembers the latest saved day.`
-    : 'The first loaded list auto-saves for tracking. Use Save only if you want to replace it.';
+    : 'The first loaded list auto-saves for tracking. Save locks that day unless you explicitly replace it.';
 
   return `
 <div class="tracker">
   <div class="tracker-title">Track These Picks</div>
   <div class="tracker-actions">
     <button onclick="saveCurrentPicks()">Save today's picks</button>
-    <button onclick="copyPicksForSheets()">Copy picks for Sheets</button>
+    <button onclick="replaceCurrentPicks()">Replace saved picks</button>
     <button onclick="checkSavedPicks()">Check saved picks</button>
-    <button onclick="copyResultsForSheets()">Copy result columns</button>
-    <button onclick="copyCompletedRowsForSheets()">Copy completed rows</button>
-    <button onclick="copyDebugRowsForSheets()">Copy debug rows</button>
+    <button onclick="copyAnalysisRowsForSheets()">Copy hit analysis</button>
   </div>
   <div class="tracker-output" id="tracker-output">${savedText}</div>
 </div>`;
@@ -1319,10 +1325,32 @@ function saveCurrentPicks() {
     return;
   }
 
+  const existing = getSavedPicksForDate(currentPickDate);
+  if (existing?.picks?.length) {
+    if (out) out.textContent = `Already saved ${existing.picks.length} picks for ${formatDate(existing.date)}. Use "Replace saved picks" only if you want to overwrite that locked list.`;
+    return;
+  }
+
   const payload = currentPickPayload();
   storePickPayload(payload);
   lastCheckedPickRows = null;
+  lastCheckedPickDate = null;
   if (out) out.textContent = `Saved ${payload.picks.length} picks for ${formatDate(payload.date)}. Come back after the games finish and tap "Check saved picks."`;
+  savePageCache();
+}
+
+function replaceCurrentPicks() {
+  const out = document.getElementById('tracker-output');
+  if (!currentPickDate || !currentTopPicks.length) {
+    if (out) out.textContent = 'No picks are loaded yet.';
+    return;
+  }
+
+  const payload = currentPickPayload();
+  storePickPayload(payload);
+  lastCheckedPickRows = null;
+  lastCheckedPickDate = null;
+  if (out) out.textContent = `Replaced saved picks for ${formatDate(payload.date)} with the ${payload.picks.length} currently displayed picks.`;
   savePageCache();
 }
 
@@ -1332,24 +1360,7 @@ function autoSaveCurrentPicks() {
   storePickPayload(currentPickPayload());
 }
 
-const SHEET_COLUMNS = [
-  'Date',
-  'Rank',
-  'Player',
-  'Team',
-  'Chance',
-  'Raw Chance',
-  'Single-trip Hit Rate',
-  'Pitcher',
-  'Pitcher Hand',
-  'Batting Order',
-  'Venue',
-  'Result',
-  'Hits',
-  'At-Bats',
-];
-
-const DEBUG_COLUMNS = [
+const ANALYSIS_COLUMNS = [
   'Date',
   'Rank',
   'Player',
@@ -1383,40 +1394,15 @@ function tsvCell(value) {
   return String(value ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
 }
 
-function rowsToTsv(rows, includeHeader = true) {
-  const lines = includeHeader ? [SHEET_COLUMNS] : [];
-  lines.push(...rows);
-  return lines.map(row => row.map(tsvCell).join('\t')).join('\n');
-}
-
 function rowsToTsvWithColumns(columns, rows) {
   return [columns, ...rows].map(row => row.map(tsvCell).join('\t')).join('\n');
-}
-
-function savedPickToSheetRow(date, pick, result = '', hits = '', atBats = '') {
-  return [
-    date,
-    pick.rank,
-    pick.batterName,
-    pick.batterTeam,
-    pctText(pick.prob),
-    pctText(pick.rawProb),
-    pctText(pick.pHit),
-    pick.pitcherName,
-    pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
-    pick.lineupPos,
-    pick.venue,
-    result,
-    hits,
-    atBats,
-  ];
 }
 
 function decText(value, places = 3) {
   return value == null || value === '' || isNaN(value) ? '' : Number(value).toFixed(places);
 }
 
-function savedPickToDebugRow(date, pick, result = '', hits = '', atBats = '') {
+function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '') {
   const outcome = result === 'Hit' ? 1 : result === 'Miss' ? 0 : '';
   return [
     date,
@@ -1468,18 +1454,6 @@ async function copyText(text, successMessage) {
   }
 }
 
-async function copyPicksForSheets() {
-  const out = document.getElementById('tracker-output');
-  if (!currentPickDate || !currentTopPicks.length) {
-    if (out) out.textContent = 'No picks are loaded yet.';
-    return;
-  }
-  saveCurrentPicks();
-  const saved = getSavedPicks();
-  const rows = saved.picks.map(pick => savedPickToSheetRow(saved.date, pick));
-  await copyText(rowsToTsv(rows), 'Copied today\'s pick rows. Paste them into Google Sheets.');
-}
-
 function renderSavedPickResults(saved, rows) {
   const completed = rows.filter(r => r.status !== 'pending');
   const hits = completed.filter(r => r.hit).length;
@@ -1501,7 +1475,7 @@ function renderSavedPickResults(saved, rows) {
 
 async function checkSavedPicks() {
   const out = document.getElementById('tracker-output');
-  const saved = getSavedPicks();
+  const saved = getSavedPicksForResults();
   if (!saved?.picks?.length) {
     if (out) out.textContent = 'No saved picks yet. Tap "Save today\'s picks" first.';
     return;
@@ -1532,6 +1506,7 @@ async function checkSavedPicks() {
     });
 
     lastCheckedPickRows = rows;
+    lastCheckedPickDate = saved.date;
     if (out) out.innerHTML = renderSavedPickResults(saved, rows);
     savePageCache();
   } catch (e) {
@@ -1539,34 +1514,7 @@ async function checkSavedPicks() {
   }
 }
 
-async function copyResultsForSheets() {
-  const out = document.getElementById('tracker-output');
-  const saved = getSavedPicks();
-  if (!saved?.picks?.length) {
-    if (out) out.textContent = 'No saved picks yet. Tap "Save today\'s picks" first.';
-    return;
-  }
-
-  if (!lastCheckedPickRows) {
-    await checkSavedPicks();
-  }
-
-  if (!lastCheckedPickRows) return;
-
-  const resultRows = lastCheckedPickRows.map(row => [
-    row.status === 'pending' ? 'Pending' : row.hit ? 'Hit' : 'Miss',
-    row.hits,
-    row.atBats,
-  ]);
-
-  await copyText(
-    resultRows.map(row => row.map(tsvCell).join('\t')).join('\n'),
-    'Copied result columns. In Sheets, tap the first Result cell for this saved date, then paste.'
-  );
-}
-
-async function getSavedRowsWithResults() {
-  const saved = getSavedPicks();
+async function getSavedRowsWithResults(saved = getSavedPicksForResults()) {
   if (!saved?.picks?.length) return null;
 
   const boxscores = new Map();
@@ -1593,7 +1541,7 @@ async function getSavedRowsWithResults() {
   return { saved, rows };
 }
 
-async function copyCompletedRowsForSheets() {
+async function copyAnalysisRowsForSheets() {
   const out = document.getElementById('tracker-output');
   const data = await getSavedRowsWithResults();
   if (!data) {
@@ -1601,7 +1549,7 @@ async function copyCompletedRowsForSheets() {
     return;
   }
 
-  const rows = data.rows.map(row => savedPickToSheetRow(
+  const rows = data.rows.map(row => savedPickToAnalysisRow(
     data.saved.date,
     row.pick,
     row.result,
@@ -1610,39 +1558,15 @@ async function copyCompletedRowsForSheets() {
   ));
 
   await copyText(
-    rowsToTsv(rows),
-    'Copied completed rows. Paste them into Google Sheets as new rows.'
-  );
-}
-
-async function copyDebugRowsForSheets() {
-  const out = document.getElementById('tracker-output');
-  const data = await getSavedRowsWithResults();
-  if (!data) {
-    if (out) out.textContent = 'No saved picks yet.';
-    return;
-  }
-
-  const rows = data.rows.map(row => savedPickToDebugRow(
-    data.saved.date,
-    row.pick,
-    row.result,
-    row.hits,
-    row.atBats
-  ));
-
-  await copyText(
-    rowsToTsvWithColumns(DEBUG_COLUMNS, rows),
-    'Copied hit debug rows. Paste them into a separate Google Sheets tab for tuning.'
+    rowsToTsvWithColumns(ANALYSIS_COLUMNS, rows),
+    'Copied completed hit analysis rows. Paste them into the Hit Analysis tab.'
   );
 }
 
 window.saveCurrentPicks = saveCurrentPicks;
+window.replaceCurrentPicks = replaceCurrentPicks;
 window.checkSavedPicks = checkSavedPicks;
-window.copyPicksForSheets = copyPicksForSheets;
-window.copyResultsForSheets = copyResultsForSheets;
-window.copyCompletedRowsForSheets = copyCompletedRowsForSheets;
-window.copyDebugRowsForSheets = copyDebugRowsForSheets;
+window.copyAnalysisRowsForSheets = copyAnalysisRowsForSheets;
 
 function renderBacktestPanel(defaultDate = addDays(todayStr(), -1)) {
   return `
@@ -2144,17 +2068,68 @@ function restorePageCache() {
   }
 }
 
+function renderSavedPickSnapshot(saved) {
+  const rows = saved.picks.map(pick => `
+    <div class="summary-row">
+      <div class="summary-rank">#${pick.rank}</div>
+      <div class="summary-name">${pick.batterName}</div>
+      <div class="summary-pct">${pctText(pick.prob)}</div>
+    </div>`).join('');
+
+  return `
+<div class="summary-list">
+  <div class="summary-title">Locked Saved Picks</div>
+  ${rows}
+</div>
+${renderPickTracker()}
+<div class="info-box">
+  <strong>Showing saved picks for ${formatDate(saved.date)}</strong>
+  These are the locked picks used for result checks and completed-row copies.
+  Use the refresh button only when you want to run a new model list.
+</div>
+${renderBacktestPanel()}`;
+}
+
+function restoreSavedPickView() {
+  const saved = getSavedPicksForDate(todayStr()) || getSavedPicksForResults();
+  if (!saved?.picks?.length) return false;
+  currentPickDate = saved.date;
+  currentTopPicks = saved.picks;
+  document.getElementById('date-label').textContent = `${formatDate(saved.date)} saved`;
+  document.getElementById('updated-at').textContent = `Saved ${new Date(saved.savedAt || Date.now()).toLocaleString()}`;
+  show(renderSavedPickSnapshot(saved));
+  savePageCache();
+  return true;
+}
+
+function shouldForceRefresh() {
+  try {
+    const force = sessionStorage.getItem(FORCE_REFRESH_KEY) === '1';
+    sessionStorage.removeItem(FORCE_REFRESH_KEY);
+    return force;
+  } catch {
+    return false;
+  }
+}
+
 function refreshPage() {
-  try { sessionStorage.removeItem(PAGE_CACHE_KEY); } catch {}
+  try {
+    sessionStorage.removeItem(PAGE_CACHE_KEY);
+    sessionStorage.setItem(FORCE_REFRESH_KEY, '1');
+  } catch {}
   location.reload();
 }
 
 window.refreshPage = refreshPage;
 
-if (!restorePageCache()) main().catch(e => show(
-  `<div class="error-box">Error: ${e.message}` +
-  `<button class="refresh-btn" onclick="refreshPage()">↻ Retry</button></div>`
-));
+if (!shouldForceRefresh() && (restorePageCache() || restoreSavedPickView())) {
+  // Restored the locked tracking view.
+} else {
+  main().catch(e => show(
+    `<div class="error-box">Error: ${e.message}` +
+    `<button class="refresh-btn" onclick="refreshPage()">↻ Retry</button></div>`
+  ));
+}
 </script>
 </body>
 </html>

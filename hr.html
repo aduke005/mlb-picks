@@ -123,7 +123,7 @@ h1 {
   border-top: 1px solid var(--border);
 }
 
-.summary-row:first-of-type { border-top: 0; }
+.summary-title + .summary-row { border-top: 0; }
 
 .summary-rank {
   color: var(--muted);
@@ -447,6 +447,7 @@ footer {
 const API = 'https://statsapi.mlb.com/api/v1';
 const SEASON = new Date().getFullYear();
 const PAGE_CACHE_KEY = 'mlb-hr-watchlist-page-cache-v1';
+const FORCE_REFRESH_KEY = 'mlb-hr-watchlist-force-refresh-v1';
 const PAGE_CACHE_TTL = 15 * 60 * 1000;
 const HR_PICK_STORE_KEY = 'mlb-hr-picks-saved-v1';
 const HR_PICK_HISTORY_KEY = 'mlb-hr-picks-history-v1';
@@ -454,6 +455,7 @@ const HR_PICK_HISTORY_KEY = 'mlb-hr-picks-history-v1';
 let currentHrPicks = [];
 let currentHrDate = null;
 let lastCheckedHrRows = null;
+let lastCheckedHrDate = null;
 
 const LEAGUE = {
   hrPerPa: 0.028,
@@ -863,7 +865,7 @@ function fmtRate(n) {
   if (n == null || isNaN(n)) return '.---';
   return n.toFixed(3).replace(/^0/, '');
 }
-function fmtNum(n, dec = 2) { return !n || isNaN(n) ? '—' : n.toFixed(dec); }
+function fmtNum(n, dec = 2) { return n == null || n === '' || isNaN(n) ? '—' : n.toFixed(dec); }
 
 function fcls(v, goodAbove1 = true) {
   const d = v - 1;
@@ -928,19 +930,17 @@ function renderSummary(picks) {
 }
 
 function renderToolbar() {
-  const saved = getSavedHrPicks();
+  const saved = (currentHrDate && getSavedHrPicksForDate(currentHrDate)) || getSavedHrPicksForResults();
   const savedText = saved
     ? `Saved ${saved.picks.length} HR picks for ${formatDate(saved.date)}.`
-    : 'The first loaded HR list auto-saves for tracking. Use Save only if you want to replace it.';
+    : 'The first loaded HR list auto-saves for tracking. Save locks that day unless you explicitly replace it.';
   return `
 <div class="toolbar">
   <div class="tracker-actions">
     <button onclick="saveCurrentHrPicks()">Save HR picks</button>
-    <button onclick="copyHrPicksForSheets()">Copy HR picks for Sheets</button>
+    <button onclick="replaceCurrentHrPicks()">Replace saved HR picks</button>
     <button onclick="checkSavedHrPicks()">Check saved HR picks</button>
-    <button onclick="copyHrResultsForSheets()">Copy HR result columns</button>
-    <button onclick="copyCompletedHrRowsForSheets()">Copy completed HR rows</button>
-    <button onclick="copyHrDebugRowsForSheets()">Copy HR debug rows</button>
+    <button onclick="copyHrAnalysisRowsForSheets()">Copy HR analysis</button>
   </div>
   <div class="toolbar-output" id="hr-toolbar-output">${savedText}</div>
 </div>`;
@@ -1107,31 +1107,60 @@ function restorePageCache() {
   }
 }
 
+function renderSavedHrSnapshot(saved) {
+  const rows = saved.picks.map(pick => `
+    <div class="summary-row">
+      <div class="summary-rank">#${pick.rank}</div>
+      <div class="summary-name">${pick.batterName}</div>
+      <div class="summary-pct">${fmtPct(pick.prob)}</div>
+    </div>`).join('');
+
+  return `
+<div class="summary-list">
+  <div class="summary-title">Locked Saved HR Picks</div>
+  ${rows}
+</div>
+${renderToolbar()}
+<div class="info-box">
+  <strong>Showing saved HR picks for ${formatDate(saved.date)}</strong>
+  These are the locked picks used for result checks and completed-row copies.
+  Use the refresh button only when you want to run a new model list.
+</div>`;
+}
+
+function restoreSavedHrView() {
+  const saved = getSavedHrPicksForDate(todayStr()) || getSavedHrPicksForResults();
+  if (!saved?.picks?.length) return false;
+  currentHrDate = saved.date;
+  currentHrPicks = saved.picks;
+  document.getElementById('date-label').textContent = `${formatDate(saved.date)} saved`;
+  document.getElementById('updated-at').textContent = `Saved ${new Date(saved.savedAt || Date.now()).toLocaleString()}`;
+  show(renderSavedHrSnapshot(saved));
+  savePageCache();
+  return true;
+}
+
+function shouldForceRefresh() {
+  try {
+    const force = sessionStorage.getItem(FORCE_REFRESH_KEY) === '1';
+    sessionStorage.removeItem(FORCE_REFRESH_KEY);
+    return force;
+  } catch {
+    return false;
+  }
+}
+
 function refreshPage() {
-  try { sessionStorage.removeItem(PAGE_CACHE_KEY); } catch {}
+  try {
+    sessionStorage.removeItem(PAGE_CACHE_KEY);
+    sessionStorage.setItem(FORCE_REFRESH_KEY, '1');
+  } catch {}
   location.reload();
 }
 
 window.refreshPage = refreshPage;
 
-const HR_SHEET_COLUMNS = [
-  'Date',
-  'Rank',
-  'Player',
-  'Team',
-  'HR Chance',
-  'Raw Chance',
-  'Single-trip HR Rate',
-  'Longshot Tier',
-  'Pitcher',
-  'Pitcher Hand',
-  'Batting Order',
-  'Venue',
-  'Result',
-  'HR',
-];
-
-const HR_DEBUG_COLUMNS = [
+const HR_ANALYSIS_COLUMNS = [
   'Date',
   'Rank',
   'Player',
@@ -1160,22 +1189,8 @@ function tsvCell(value) {
   return String(value ?? '').replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
 }
 
-function rowsToTsv(rows) {
-  return [HR_SHEET_COLUMNS, ...rows].map(row => row.map(tsvCell).join('\t')).join('\n');
-}
-
 function rowsToTsvWithColumns(columns, rows) {
   return [columns, ...rows].map(row => row.map(tsvCell).join('\t')).join('\n');
-}
-
-function getSavedHrPicks() {
-  try {
-    const history = getHrPickHistory();
-    const fromHistory = pickSavedPayload(history, true);
-    return fromHistory || JSON.parse(localStorage.getItem(HR_PICK_STORE_KEY) || 'null');
-  } catch {
-    return null;
-  }
 }
 
 function getHrPickHistory() {
@@ -1186,13 +1201,29 @@ function getHrPickHistory() {
   }
 }
 
-function pickSavedPayload(history, preferPastDate = false) {
+function getSavedHrPicksForDate(date) {
+  return getHrPickHistory()[date] || null;
+}
+
+function getLatestSavedHrPicks() {
+  return pickSavedPayload(getHrPickHistory());
+}
+
+function getLatestPastSavedHrPicks() {
+  return pickSavedPayload(getHrPickHistory(), { pastOnly: true });
+}
+
+function getSavedHrPicksForResults() {
+  return getLatestPastSavedHrPicks() || getLatestSavedHrPicks();
+}
+
+function pickSavedPayload(history, options = {}) {
   const values = Object.values(history || {}).filter(p => p?.date && p?.picks?.length);
   if (!values.length) return null;
   values.sort((a, b) => b.date.localeCompare(a.date));
-  if (preferPastDate) {
+  if (options.pastOnly) {
     const today = todayStr();
-    return values.find(p => p.date < today) || values[0];
+    return values.find(p => p.date < today) || null;
   }
   return values[0];
 }
@@ -1241,6 +1272,13 @@ function saveCurrentHrPicks() {
     if (out) out.textContent = 'No HR picks are loaded yet.';
     return;
   }
+
+  const existing = getSavedHrPicksForDate(currentHrDate);
+  if (existing?.picks?.length) {
+    if (out) out.textContent = `Already saved ${existing.picks.length} HR picks for ${formatDate(existing.date)}. Use "Replace saved HR picks" only if you want to overwrite that locked list.`;
+    return;
+  }
+
   const payload = {
     date: currentHrDate,
     savedAt: new Date().toISOString(),
@@ -1248,7 +1286,26 @@ function saveCurrentHrPicks() {
   };
   storeHrPickPayload(payload);
   lastCheckedHrRows = null;
+  lastCheckedHrDate = null;
   if (out) out.textContent = `Saved ${payload.picks.length} HR picks for ${formatDate(payload.date)}.`;
+  savePageCache();
+}
+
+function replaceCurrentHrPicks() {
+  const out = document.getElementById('hr-toolbar-output');
+  if (!currentHrDate || !currentHrPicks.length) {
+    if (out) out.textContent = 'No HR picks are loaded yet.';
+    return;
+  }
+  const payload = {
+    date: currentHrDate,
+    savedAt: new Date().toISOString(),
+    picks: currentHrPicks.map(hrPickPayload),
+  };
+  storeHrPickPayload(payload);
+  lastCheckedHrRows = null;
+  lastCheckedHrDate = null;
+  if (out) out.textContent = `Replaced saved HR picks for ${formatDate(payload.date)} with the ${payload.picks.length} currently displayed picks.`;
   savePageCache();
 }
 
@@ -1263,30 +1320,11 @@ function autoSaveCurrentHrPicks() {
   storeHrPickPayload(payload);
 }
 
-function hrSheetRow(date, pick, result = '', hr = '') {
-  return [
-    date,
-    pick.rank,
-    pick.batterName,
-    pick.batterTeam,
-    fmtPct(pick.prob),
-    fmtPct(pick.rawProb),
-    fmtPct(pick.pHr),
-    hrTier(pick.prob).label,
-    pick.pitcherName,
-    pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
-    pick.lineupPos,
-    pick.venue,
-    result,
-    hr,
-  ];
-}
-
 function decText(value, places = 3) {
   return value == null || value === '' || isNaN(value) ? '' : Number(value).toFixed(places);
 }
 
-function hrDebugRow(date, pick, result = '', hr = '') {
+function hrAnalysisRow(date, pick, result = '', hr = '') {
   const outcome = result === 'HR' ? 1 : result === 'No HR' ? 0 : '';
   return [
     date,
@@ -1338,20 +1376,6 @@ async function copyText(text, successMessage) {
   }
 }
 
-async function copyHrPicksForSheets() {
-  const out = document.getElementById('hr-toolbar-output');
-  if (!currentHrDate || !currentHrPicks.length) {
-    if (out) out.textContent = 'No HR picks are loaded yet.';
-    return;
-  }
-
-  saveCurrentHrPicks();
-  const saved = getSavedHrPicks();
-  const rows = saved.picks.map(pick => hrSheetRow(saved.date, pick));
-
-  await copyText(rowsToTsv(rows), 'Copied HR watchlist rows. Paste them into Google Sheets.');
-}
-
 function renderSavedHrResults(saved, rows) {
   const completed = rows.filter(r => r.status !== 'pending');
   const homers = completed.filter(r => r.hr > 0).length;
@@ -1374,7 +1398,7 @@ async function getBoxscore(gamePk) {
 
 async function checkSavedHrPicks() {
   const out = document.getElementById('hr-toolbar-output');
-  const saved = getSavedHrPicks();
+  const saved = getSavedHrPicksForResults();
   if (!saved?.picks?.length) {
     if (out) out.textContent = 'No saved HR picks yet. Tap "Save HR picks" first.';
     return;
@@ -1390,8 +1414,7 @@ async function checkSavedHrPicks() {
 
     const rows = saved.picks.map(pick => {
       const box = boxscores.get(pick.gamePk);
-      const player = Object.values(box?.teams?.away?.players || {})
-        .concat(Object.values(box?.teams?.home?.players || {}))
+      const player = Object.values(box?.teams?.[pick.side]?.players || {})
         .find(p => p.person?.id === pick.batterId);
       const batting = player?.stats?.batting;
       return {
@@ -1403,6 +1426,7 @@ async function checkSavedHrPicks() {
     });
 
     lastCheckedHrRows = rows;
+    lastCheckedHrDate = saved.date;
     if (out) out.innerHTML = renderSavedHrResults(saved, rows);
     savePageCache();
   } catch (e) {
@@ -1410,8 +1434,7 @@ async function checkSavedHrPicks() {
   }
 }
 
-async function getSavedHrRowsWithResults() {
-  const saved = getSavedHrPicks();
+async function getSavedHrRowsWithResults(saved = getSavedHrPicksForResults()) {
   if (!saved?.picks?.length) return null;
 
   const boxscores = new Map();
@@ -1421,8 +1444,7 @@ async function getSavedHrRowsWithResults() {
 
   const rows = saved.picks.map(pick => {
     const box = boxscores.get(pick.gamePk);
-    const player = Object.values(box?.teams?.away?.players || {})
-      .concat(Object.values(box?.teams?.home?.players || {}))
+    const player = Object.values(box?.teams?.[pick.side]?.players || {})
       .find(p => p.person?.id === pick.batterId);
     const batting = player?.stats?.batting;
     const hr = batting?.homeRuns ?? '';
@@ -1437,32 +1459,7 @@ async function getSavedHrRowsWithResults() {
   return { saved, rows };
 }
 
-async function copyHrResultsForSheets() {
-  const out = document.getElementById('hr-toolbar-output');
-  const saved = getSavedHrPicks();
-  if (!saved?.picks?.length) {
-    if (out) out.textContent = 'No saved HR picks yet. Tap "Save HR picks" first.';
-    return;
-  }
-
-  if (!lastCheckedHrRows) {
-    await checkSavedHrPicks();
-  }
-
-  if (!lastCheckedHrRows) return;
-
-  const resultRows = lastCheckedHrRows.map(row => [
-    row.status === 'pending' ? 'Pending' : row.hr > 0 ? 'HR' : 'No HR',
-    row.hr,
-  ]);
-
-  await copyText(
-    resultRows.map(row => row.map(tsvCell).join('\t')).join('\n'),
-    'Copied HR result columns. In Sheets, tap the first Result cell for this HR date, then paste.'
-  );
-}
-
-async function copyCompletedHrRowsForSheets() {
+async function copyHrAnalysisRowsForSheets() {
   const out = document.getElementById('hr-toolbar-output');
   const data = await getSavedHrRowsWithResults();
   if (!data) {
@@ -1470,7 +1467,7 @@ async function copyCompletedHrRowsForSheets() {
     return;
   }
 
-  const rows = data.rows.map(row => hrSheetRow(
+  const rows = data.rows.map(row => hrAnalysisRow(
     data.saved.date,
     row.pick,
     row.result,
@@ -1478,38 +1475,15 @@ async function copyCompletedHrRowsForSheets() {
   ));
 
   await copyText(
-    rowsToTsv(rows),
-    'Copied completed HR rows. Paste them into Google Sheets as new rows.'
-  );
-}
-
-async function copyHrDebugRowsForSheets() {
-  const out = document.getElementById('hr-toolbar-output');
-  const data = await getSavedHrRowsWithResults();
-  if (!data) {
-    if (out) out.textContent = 'No saved HR picks yet.';
-    return;
-  }
-
-  const rows = data.rows.map(row => hrDebugRow(
-    data.saved.date,
-    row.pick,
-    row.result,
-    row.hr
-  ));
-
-  await copyText(
-    rowsToTsvWithColumns(HR_DEBUG_COLUMNS, rows),
-    'Copied HR debug rows. Paste them into a separate Google Sheets tab for tuning.'
+    rowsToTsvWithColumns(HR_ANALYSIS_COLUMNS, rows),
+    'Copied completed HR analysis rows. Paste them into the HR Analysis tab.'
   );
 }
 
 window.saveCurrentHrPicks = saveCurrentHrPicks;
-window.copyHrPicksForSheets = copyHrPicksForSheets;
+window.replaceCurrentHrPicks = replaceCurrentHrPicks;
 window.checkSavedHrPicks = checkSavedHrPicks;
-window.copyHrResultsForSheets = copyHrResultsForSheets;
-window.copyCompletedHrRowsForSheets = copyCompletedHrRowsForSheets;
-window.copyHrDebugRowsForSheets = copyHrDebugRowsForSheets;
+window.copyHrAnalysisRowsForSheets = copyHrAnalysisRowsForSheets;
 
 async function main() {
   const date = todayStr();
@@ -1693,9 +1667,13 @@ async function main() {
   savePageCache();
 }
 
-if (!restorePageCache()) main().catch(e => show(
-  `<div class="error-box">Error: ${e.message}<button class="refresh-btn" onclick="refreshPage()">Retry</button></div>`
-));
+if (!shouldForceRefresh() && (restorePageCache() || restoreSavedHrView())) {
+  // Restored the locked tracking view.
+} else {
+  main().catch(e => show(
+    `<div class="error-box">Error: ${e.message}<button class="refresh-btn" onclick="refreshPage()">Retry</button></div>`
+  ));
+}
 </script>
 </body>
 </html>
