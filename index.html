@@ -85,6 +85,14 @@ h1 {
   font-size: 1rem;
   cursor: pointer;
   font-family: inherit;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.top-refresh:active {
+  background: var(--blue);
+  color: var(--bg);
+  border-color: var(--blue);
 }
 
 .updated-at {
@@ -295,6 +303,14 @@ h1 {
   font-size: 0.9rem;
   cursor: pointer;
   font-family: inherit;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.refresh-btn:active {
+  background: var(--blue);
+  color: var(--bg);
+  border-color: var(--blue);
 }
 
 .inline-note {
@@ -389,6 +405,14 @@ h1 {
   font-size: 0.82rem;
   cursor: pointer;
   font-family: inherit;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.tracker button:active {
+  background: var(--blue);
+  color: var(--bg);
+  border-color: var(--blue);
 }
 
 .tracker-output {
@@ -448,6 +472,14 @@ h1 {
   font-size: 0.85rem;
   cursor: pointer;
   font-family: inherit;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.backtest button:active {
+  background: var(--blue);
+  color: var(--bg);
+  border-color: var(--blue);
 }
 
 .backtest-output {
@@ -522,6 +554,7 @@ let currentPickDate = null;
 let currentTopPicks = [];
 let lastCheckedPickRows = null;
 let lastCheckedPickDate = null;
+let lastBacktestAuditRows = null;
 
 // League-average baselines for normalization
 const LEAGUE = {
@@ -900,7 +933,7 @@ function hitGameEnvironmentFactors(candidates) {
   const factors = new Map();
   for (const [gamePk, picks] of grouped.entries()) {
     const avgEnv = average(picks.map(p => p.pitcherWeakness * p.parkFactor));
-    factors.set(gamePk, avgEnv == null ? 1.0 : clamp(shrink(avgEnv, 1.0, picks.length, 12), 0.94, 1.06));
+    factors.set(gamePk, avgEnv == null ? 1.0 : clamp(shrink(avgEnv, 1.0, picks.length, 12), 0.97, 1.03));
   }
   return factors;
 }
@@ -971,9 +1004,13 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind, gameEnv
     (recentERAVal  / LEAGUE.era)  * 0.10,
     0.65, 1.55
   );
+  const basePitcherWeakness =
+    shrink(rawPitcherWeakness, 1.0, pitcher.ip || 0, MODEL.pitcherIpPrior) * ttoFactor(lineupPos);
   const pitcherWeakness = clamp(
-    shrink(rawPitcherWeakness, 1.0, pitcher.ip || 0, MODEL.pitcherIpPrior) * ttoFactor(lineupPos),
-    0.78, 1.35
+    basePitcherWeakness > 1
+      ? 1 + ((basePitcherWeakness - 1) * 0.75)
+      : basePitcherWeakness,
+    0.78, 1.25
   );
 
   const wf    = windFactor(wind);
@@ -1361,6 +1398,7 @@ function autoSaveCurrentPicks() {
 }
 
 const ANALYSIS_COLUMNS = [
+  'Source',
   'Date',
   'Rank',
   'Player',
@@ -1402,9 +1440,10 @@ function decText(value, places = 3) {
   return value == null || value === '' || isNaN(value) ? '' : Number(value).toFixed(places);
 }
 
-function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '') {
+function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '', source = 'pick') {
   const outcome = result === 'Hit' ? 1 : result === 'Miss' ? 0 : '';
   return [
+    source,
     date,
     pick.rank,
     pick.batterName,
@@ -1429,6 +1468,33 @@ function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '')
     pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
     pick.venue,
   ];
+}
+
+function auditRowToAnalysisRow(row) {
+  return savedPickToAnalysisRow(row.date, row.pick, row.result, row.hits, row.atBats, 'audit');
+}
+
+async function copyTextToOutput(text, successMessage, outputId) {
+  const out = document.getElementById(outputId);
+  try {
+    const clipboard = globalThis.navigator?.clipboard;
+    if (clipboard?.writeText) {
+      await clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    if (out) out.textContent = successMessage;
+  } catch (e) {
+    if (out) out.innerHTML = `<span class="bad">Copy failed: ${e.message}</span>`;
+  }
 }
 
 async function copyText(text, successMessage) {
@@ -1563,10 +1629,26 @@ async function copyAnalysisRowsForSheets() {
   );
 }
 
+async function copyBacktestAuditRows() {
+  if (!lastBacktestAuditRows?.length) {
+    const out = document.getElementById('backtest-output');
+    if (out) out.textContent = 'Run the backtest first, then copy the full slate audit.';
+    return;
+  }
+
+  const rows = lastBacktestAuditRows.map(auditRowToAnalysisRow);
+  await copyTextToOutput(
+    rowsToTsvWithColumns(ANALYSIS_COLUMNS, rows),
+    `Copied ${rows.length} full slate audit rows. Paste them into the Hit Analysis tab.`,
+    'backtest-output'
+  );
+}
+
 window.saveCurrentPicks = saveCurrentPicks;
 window.replaceCurrentPicks = replaceCurrentPicks;
 window.checkSavedPicks = checkSavedPicks;
 window.copyAnalysisRowsForSheets = copyAnalysisRowsForSheets;
+window.copyBacktestAuditRows = copyBacktestAuditRows;
 
 function renderBacktestPanel(defaultDate = addDays(todayStr(), -1)) {
   return `
@@ -1578,7 +1660,7 @@ function renderBacktestPanel(defaultDate = addDays(todayStr(), -1)) {
   </div>
   <div class="backtest-output" id="backtest-output">
     Scores completed games for one prior date and compares prediction buckets to boxscores.
-    Uses date-limited season totals; historical handedness splits are skipped because the MLB split endpoint is not date-limited.
+    Full audit rows export as Source=audit and skip recent-form refinements plus historical handedness splits.
   </div>
 </div>`;
 }
@@ -1595,7 +1677,8 @@ function renderBacktestResult(result) {
     <div><strong>${formatDate(result.date)}</strong></div>
     <div>${result.picks} batter-game picks across ${result.games} completed games.</div>
     <div>Brier score: ${result.brier.toFixed(3)} - Overall hit rate: ${Math.round(result.hitRate * 100)}%</div>
-    <div>Note: date-limited backtests skip handedness splits because MLB split stats are season-current only.</div>
+    <div>Note: Source=audit rows use fast date-limited stats and skip recent-form refinements plus handedness splits.</div>
+    <button class="refresh-btn" onclick="copyBacktestAuditRows()">Copy full slate audit</button>
     <div style="margin-top:8px">${bucketRows}</div>`;
 }
 
@@ -1665,6 +1748,7 @@ async function runBacktest() {
   const out = document.getElementById('backtest-output');
   const date = input?.value || addDays(todayStr(), -1);
   const priorDate = addDays(date, -1);
+  lastBacktestAuditRows = null;
   out.textContent = 'Running backtest...';
 
   try {
@@ -1681,8 +1765,8 @@ async function runBacktest() {
       if (g.teams?.home?.probablePitcher?.id) pitcherIds.add(g.teams.home.probablePitcher.id);
       if (g.teams?.away?.probablePitcher?.id) pitcherIds.add(g.teams.away.probablePitcher.id);
       const sides = [
-        { side: 'away', players: g.lineups.awayPlayers, pitcher: g.teams?.home?.probablePitcher },
-        { side: 'home', players: g.lineups.homePlayers, pitcher: g.teams?.away?.probablePitcher },
+        { side: 'away', players: g.lineups.awayPlayers, team: g.teams?.away?.team?.name ?? 'Away', pitcher: g.teams?.home?.probablePitcher },
+        { side: 'home', players: g.lineups.homePlayers, team: g.teams?.home?.team?.name ?? 'Home', pitcher: g.teams?.away?.probablePitcher },
       ];
       for (const side of sides) {
         side.players.forEach((p, idx) => {
@@ -1691,8 +1775,12 @@ async function runBacktest() {
             gamePk: g.gamePk,
             side: side.side,
             id: p.id,
+            name: p.fullName,
+            team: side.team,
             lineupPos: idx + 1,
             pitcher: side.pitcher,
+            pitcherName: side.pitcher?.fullName ?? '',
+            venue: g.venue?.name ?? 'Unknown',
             parkFactor: PARK[g.teams?.home?.team?.id]?.factor ?? 1.00,
           });
         });
@@ -1734,6 +1822,7 @@ async function runBacktest() {
       .map(label => ({ label, count: 0, hits: 0, brier: 0, hitRate: 0 }));
     const bucketMap = new Map(buckets.map(b => [b.label, b]));
     let picks = 0, hits = 0, brier = 0;
+    const auditRows = [];
 
     for (const e of entries) {
       const batter = batters[e.id];
@@ -1744,16 +1833,48 @@ async function runBacktest() {
       const boxPlayer = Object.values(boxscores.get(e.gamePk)?.teams?.[e.side]?.players || {})
         .find(p => p.person?.id === e.id);
       if (!boxPlayer?.stats?.batting) continue;
-      const actual = (boxPlayer?.stats?.batting?.hits || 0) > 0 ? 1 : 0;
+      const batting = boxPlayer.stats.batting;
+      const actual = (batting.hits || 0) > 0 ? 1 : 0;
       const err = Math.pow(s.prob - actual, 2);
       picks += 1;
       hits += actual;
       brier += err;
+      auditRows.push({
+        date,
+        sortProb: s.prob,
+        result: actual ? 'Hit' : 'Miss',
+        hits: batting.hits ?? '',
+        atBats: batting.atBats ?? '',
+        pick: {
+          rank: 0,
+          batterName: e.name,
+          batterTeam: e.team,
+          prob: s.prob,
+          pHit: s.pHit,
+          pitcherWeakness: s.pitcherWeakness,
+          platoon: s.platoon,
+          awayAdj: s.awayAdj,
+          ttoAdj: s.ttoAdj,
+          gameEnvFactor: s.gameEnvFactor,
+          parkFactor: s.parkFactor,
+          recentAdj: s.recentAdj,
+          contactAdj: s.contactAdj,
+          opsAdj: s.opsAdj,
+          lineupPos: e.lineupPos,
+          pitcherName: e.pitcherName,
+          pitcherHand: s.pitcherHand,
+          venue: e.venue,
+        },
+      });
       const bucket = bucketMap.get(bucketFor(s.prob));
       bucket.count += 1;
       bucket.hits += actual;
       bucket.brier += err;
     }
+
+    auditRows.sort((a, b) => b.sortProb - a.sortProb);
+    auditRows.forEach((row, idx) => { row.pick.rank = idx + 1; });
+    lastBacktestAuditRows = auditRows;
 
     for (const b of buckets) {
       b.hitRate = b.count ? b.hits / b.count : 0;
@@ -1769,6 +1890,7 @@ async function runBacktest() {
       buckets,
     });
   } catch (e) {
+    lastBacktestAuditRows = null;
     out.innerHTML = `<span class="bad">Backtest failed: ${e.message}</span>`;
   }
 }
