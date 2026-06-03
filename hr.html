@@ -220,6 +220,29 @@ h1 {
   line-height: 1.4;
 }
 
+.toolbar-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
+.backtest-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.backtest-controls input {
+  flex: 1;
+  min-width: 0;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font: inherit;
+  padding: 9px 10px;
+}
+
 .status-alert {
   background: #251a06;
   border: 1px solid var(--yellow);
@@ -480,6 +503,7 @@ let currentHrPicks = [];
 let currentHrDate = null;
 let lastCheckedHrRows = null;
 let lastCheckedHrDate = null;
+let lastHrBacktestAuditRows = null;
 
 const LEAGUE = {
   hrPerPa: 0.028,
@@ -589,6 +613,12 @@ function todayStr() { return new Date().toLocaleDateString('en-CA'); }
 function recentStartDate(days = 15) {
   const d = new Date();
   d.setDate(d.getDate() - days);
+  return d.toLocaleDateString('en-CA');
+}
+
+function addDays(dateStr, days) {
+  const d = new Date(dateStr + 'T12:00:00');
+  d.setDate(d.getDate() + days);
   return d.toLocaleDateString('en-CA');
 }
 
@@ -1145,6 +1175,7 @@ function renderSavedHrSnapshot(saved) {
   ${rows}
 </div>
 ${renderToolbar()}
+${renderHrBacktestPanel()}
 <div class="info-box">
   <strong>Showing saved HR picks for ${formatDate(saved.date)}</strong>
   These are the locked picks used for result checks and completed-row copies.
@@ -1185,6 +1216,7 @@ function refreshPage() {
 window.refreshPage = refreshPage;
 
 const HR_ANALYSIS_COLUMNS = [
+  'Source',
   'Date',
   'Rank',
   'Player',
@@ -1348,9 +1380,10 @@ function decText(value, places = 3) {
   return value == null || value === '' || isNaN(value) ? '' : Number(value).toFixed(places);
 }
 
-function hrAnalysisRow(date, pick, result = '', hr = '') {
+function hrAnalysisRow(date, pick, result = '', hr = '', source = 'pick') {
   const outcome = result === 'HR' ? 1 : result === 'No HR' ? 0 : '';
   return [
+    source,
     date,
     pick.rank,
     pick.batterName,
@@ -1374,6 +1407,10 @@ function hrAnalysisRow(date, pick, result = '', hr = '') {
     pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
     pick.venue,
   ];
+}
+
+function hrAuditRowToAnalysisRow(row) {
+  return hrAnalysisRow(row.date, row.pick, row.result, row.hr, 'audit');
 }
 
 async function copyText(text, successMessage) {
@@ -1400,6 +1437,29 @@ async function copyText(text, successMessage) {
   }
 }
 
+async function copyTextToOutput(text, successMessage, outputId) {
+  const out = document.getElementById(outputId);
+  try {
+    const clipboard = globalThis.navigator?.clipboard;
+    if (clipboard?.writeText) {
+      await clipboard.writeText(text);
+    } else {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+    }
+    if (out) out.textContent = successMessage;
+  } catch (e) {
+    if (out) out.innerHTML = `<span class="bad">Copy failed: ${e.message}</span>`;
+  }
+}
+
 function renderSavedHrResults(saved, rows) {
   const completed = rows.filter(r => r.status !== 'pending');
   const homers = completed.filter(r => r.hr > 0).length;
@@ -1418,6 +1478,62 @@ function renderSavedHrResults(saved, rows) {
 
 async function getBoxscore(gamePk) {
   return fetchJSON(`${API}/game/${gamePk}/boxscore`);
+}
+
+async function getBatterStatsThroughDate(id, endDate) {
+  try {
+    const season = new Date(endDate + 'T12:00:00').getFullYear();
+    const startDate = `${season}-03-01`;
+    const d = await fetchJSON(
+      `${API}/people/${id}/stats?stats=byDateRange&season=${season}&group=hitting` +
+      `&startDate=${startDate}&endDate=${endDate}`
+    );
+    const s = d.stats?.[0]?.splits?.[0]?.stat;
+    if (!s) return null;
+    const ab = parseInt(s.atBats || '0', 10);
+    const pa = parseInt(s.plateAppearances || s.atBats || '0', 10);
+    const hr = parseInt(s.homeRuns || '0', 10);
+    const so = parseInt(s.strikeOuts || '0', 10);
+    const avg = parseFloat(s.avg || '0');
+    const slg = parseFloat(s.slg || '0');
+    return {
+      avg,
+      slg,
+      ops: parseFloat(s.ops || '0'),
+      iso: Math.max(0, slg - avg),
+      hr,
+      ab,
+      pa,
+      hrPerPa: pa > 0 ? hr / pa : LEAGUE.hrPerPa,
+      kPct: pa > 0 ? so / pa : LEAGUE.kPct,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function getPitcherInfoThroughDate(id, endDate) {
+  try {
+    const season = new Date(endDate + 'T12:00:00').getFullYear();
+    const startDate = `${season}-03-01`;
+    const [sd, pd] = await Promise.all([
+      fetchJSON(`${API}/people/${id}/stats?stats=byDateRange&season=${season}&group=pitching&startDate=${startDate}&endDate=${endDate}`),
+      getPersonInfo(id),
+    ]);
+    const s = sd.stats?.[0]?.splits?.[0]?.stat || {};
+    const ip = parseFloat(s.inningsPitched || '0');
+    const hr = parseInt(s.homeRuns || '0', 10);
+    return {
+      hand: pd.pitchHand || 'R',
+      era: parseFloat(s.era || String(LEAGUE.era)),
+      whip: parseFloat(s.whip || String(LEAGUE.whip)),
+      hr9: ip > 0 ? (hr / ip * 9) : LEAGUE.hr9,
+      k9: ip > 0 ? (parseInt(s.strikeOuts || '0', 10) / ip * 9) : LEAGUE.k9,
+      ip,
+    };
+  } catch {
+    return getPitcherInfo(id);
+  }
 }
 
 async function checkSavedHrPicks() {
@@ -1504,10 +1620,212 @@ async function copyHrAnalysisRowsForSheets() {
   );
 }
 
+function renderHrBacktestPanel(defaultDate = addDays(todayStr(), -1)) {
+  return `
+<div class="toolbar">
+  <div class="toolbar-title">HR Full Slate Audit</div>
+  <div class="backtest-controls">
+    <input type="date" id="hr-backtest-date" value="${defaultDate}">
+    <button onclick="runHrBacktest()">Run</button>
+  </div>
+  <div class="toolbar-output" id="hr-backtest-output">
+    Scores completed games for one prior date. Source=audit rows use fast date-limited stats and skip recent-form refinements plus handedness splits.
+  </div>
+</div>`;
+}
+
+function renderHrBacktestResult(result) {
+  return `
+    <div><strong>${formatDate(result.date)}</strong></div>
+    <div>${result.picks} batter-game rows across ${result.games} completed games.</div>
+    <div>HR rate: ${Math.round(result.hrRate * 100)}% - Average model chance: ${Math.round(result.avgProb * 100)}%</div>
+    <div>Note: Source=audit rows use fast date-limited stats and skip recent-form refinements plus handedness splits.</div>
+    <button class="refresh-btn" onclick="copyHrBacktestCombinedRows()">Copy HR picks + full audit</button>
+    <button class="refresh-btn" onclick="copyHrBacktestAuditRows()">Copy HR audit only</button>`;
+}
+
+async function runHrBacktest() {
+  const input = document.getElementById('hr-backtest-date');
+  const out = document.getElementById('hr-backtest-output');
+  const date = input?.value || addDays(todayStr(), -1);
+  const priorDate = addDays(date, -1);
+  lastHrBacktestAuditRows = null;
+  if (out) out.textContent = 'Running HR full slate audit...';
+
+  try {
+    const games = (await getSchedule(date)).filter(g =>
+      g.status?.statusCode === 'F' &&
+      g.lineups?.homePlayers?.length &&
+      g.lineups?.awayPlayers?.length
+    );
+    const pitcherIds = new Set();
+    const batterIds = new Set();
+    const entries = [];
+
+    for (const g of games) {
+      if (g.teams?.home?.probablePitcher?.id) pitcherIds.add(g.teams.home.probablePitcher.id);
+      if (g.teams?.away?.probablePitcher?.id) pitcherIds.add(g.teams.away.probablePitcher.id);
+      const sides = [
+        { side: 'away', players: g.lineups.awayPlayers, team: g.teams?.away?.team?.name ?? 'Away', pitcher: g.teams?.home?.probablePitcher },
+        { side: 'home', players: g.lineups.homePlayers, team: g.teams?.home?.team?.name ?? 'Home', pitcher: g.teams?.away?.probablePitcher },
+      ];
+      for (const side of sides) {
+        side.players.forEach((p, idx) => {
+          batterIds.add(p.id);
+          entries.push({
+            gamePk: g.gamePk,
+            side: side.side,
+            id: p.id,
+            name: p.fullName,
+            team: side.team,
+            lineupPos: idx + 1,
+            pitcher: side.pitcher,
+            pitcherName: side.pitcher?.fullName ?? '',
+            parkFactor: HR_PARK[g.teams?.home?.team?.id]?.factor ?? 1.00,
+            venue: g.venue?.name ?? 'Unknown',
+          });
+        });
+      }
+    }
+
+    const pitcherInfo = {};
+    await Promise.all([...pitcherIds].map(async id => {
+      pitcherInfo[id] = await getPitcherInfoThroughDate(id, priorDate);
+    }));
+
+    const batterStats = {};
+    const batterHands = {};
+    await Promise.all([...batterIds].map(async id => {
+      const [stats, hand] = await Promise.all([getBatterStatsThroughDate(id, priorDate), getBatterHand(id)]);
+      batterStats[id] = stats;
+      batterHands[id] = hand;
+    }));
+
+    const preScores = [];
+    for (const e of entries) {
+      const batter = batterStats[e.id];
+      const pitcher = pitcherInfo[e.pitcher?.id];
+      if (!batter || batter.pa < MODEL.minBatterPa || !pitcher) continue;
+      preScores.push({
+        gamePk: e.gamePk,
+        parkFactor: e.parkFactor,
+        ...score(batter, pitcher, e.parkFactor, batterHands[e.id] || 'R', e.lineupPos, 1.0, e.side === 'away'),
+      });
+    }
+    const gameEnvFactors = hrGameEnvironmentFactors(preScores);
+
+    const boxscores = new Map();
+    await Promise.all(games.map(async g => {
+      boxscores.set(g.gamePk, await getBoxscore(g.gamePk));
+    }));
+
+    const auditRows = [];
+    let homers = 0;
+    let probSum = 0;
+    for (const e of entries) {
+      const batter = batterStats[e.id];
+      const pitcher = pitcherInfo[e.pitcher?.id];
+      if (!batter || batter.pa < MODEL.minBatterPa || !pitcher) continue;
+      const gameEnvFactor = gameEnvFactors.get(e.gamePk) ?? 1.0;
+      const s = score(batter, pitcher, e.parkFactor, batterHands[e.id] || 'R', e.lineupPos, gameEnvFactor, e.side === 'away');
+      const boxPlayer = Object.values(boxscores.get(e.gamePk)?.teams?.[e.side]?.players || {})
+        .find(p => p.person?.id === e.id);
+      if (!boxPlayer?.stats?.batting) continue;
+      const hr = boxPlayer.stats.batting.homeRuns || 0;
+      homers += hr > 0 ? 1 : 0;
+      probSum += s.prob;
+      auditRows.push({
+        date,
+        sortProb: s.prob,
+        result: hr > 0 ? 'HR' : 'No HR',
+        hr,
+        pick: {
+          rank: 0,
+          batterName: e.name,
+          batterTeam: e.team,
+          prob: s.prob,
+          pHr: s.pHr,
+          isoAdj: s.isoAdj,
+          pitcherRisk: s.pitcherRisk,
+          awayAdj: s.awayAdj,
+          ttoAdj: s.ttoAdj,
+          gameEnvFactor: s.gameEnvFactor,
+          parkFactor: s.parkFactor,
+          recentAdj: s.recentAdj,
+          contactAdj: s.contactAdj,
+          platoon: s.platoon,
+          lineupPos: e.lineupPos,
+          pitcherName: e.pitcherName,
+          pitcherHand: s.pitcherHand,
+          venue: e.venue,
+        },
+      });
+    }
+
+    auditRows.sort((a, b) => b.sortProb - a.sortProb);
+    auditRows.forEach((row, idx) => { row.pick.rank = idx + 1; });
+    lastHrBacktestAuditRows = auditRows;
+
+    if (out) out.innerHTML = renderHrBacktestResult({
+      date,
+      games: games.length,
+      picks: auditRows.length,
+      hrRate: auditRows.length ? homers / auditRows.length : 0,
+      avgProb: auditRows.length ? probSum / auditRows.length : 0,
+    });
+  } catch (e) {
+    lastHrBacktestAuditRows = null;
+    if (out) out.innerHTML = `<span class="bad">HR audit failed: ${e.message}</span>`;
+  }
+}
+
+async function copyHrBacktestAuditRows() {
+  if (!lastHrBacktestAuditRows?.length) {
+    const out = document.getElementById('hr-backtest-output');
+    if (out) out.textContent = 'Run the HR audit first, then copy the full slate audit.';
+    return;
+  }
+  const rows = lastHrBacktestAuditRows.map(hrAuditRowToAnalysisRow);
+  await copyTextToOutput(
+    rowsToTsvWithColumns(HR_ANALYSIS_COLUMNS, rows),
+    `Copied ${rows.length} HR audit rows. Paste them into the HR Analysis tab.`,
+    'hr-backtest-output'
+  );
+}
+
+async function copyHrBacktestCombinedRows() {
+  if (!lastHrBacktestAuditRows?.length) {
+    const out = document.getElementById('hr-backtest-output');
+    if (out) out.textContent = 'Run the HR audit first, then copy HR picks plus the full slate audit.';
+    return;
+  }
+  const auditDate = lastHrBacktestAuditRows[0]?.date;
+  const saved = auditDate ? getSavedHrPicksForDate(auditDate) : null;
+  const pickData = saved ? await getSavedHrRowsWithResults(saved) : null;
+  const pickRows = pickData
+    ? pickData.rows.map(row => hrAnalysisRow(
+        pickData.saved.date,
+        row.pick,
+        row.result,
+        row.hr
+      ))
+    : [];
+  const auditRows = lastHrBacktestAuditRows.map(hrAuditRowToAnalysisRow);
+  const rows = [...pickRows, ...auditRows];
+  await copyTextToOutput(
+    rowsToTsvWithColumns(HR_ANALYSIS_COLUMNS, rows),
+    `Copied ${pickRows.length} HR pick rows and ${auditRows.length} HR audit rows. Paste once into the HR Analysis tab.`,
+    'hr-backtest-output'
+  );
+}
+
 window.saveCurrentHrPicks = saveCurrentHrPicks;
 window.replaceCurrentHrPicks = replaceCurrentHrPicks;
 window.checkSavedHrPicks = checkSavedHrPicks;
 window.copyHrAnalysisRowsForSheets = copyHrAnalysisRowsForSheets;
+window.runHrBacktest = runHrBacktest;
+window.copyHrBacktestAuditRows = copyHrBacktestAuditRows;
+window.copyHrBacktestCombinedRows = copyHrBacktestCombinedRows;
 
 async function main() {
   const date = todayStr();
@@ -1524,7 +1842,7 @@ async function main() {
   }
 
   if (!games.length) {
-    show(renderToolbar() + `<div class="info-box"><strong>No Games Today</strong>No MLB games scheduled.</div>`);
+    show(renderToolbar() + `<div class="info-box"><strong>No Games Today</strong>No MLB games scheduled.</div>` + renderHrBacktestPanel());
     savePageCache();
     return;
   }
@@ -1541,7 +1859,7 @@ async function main() {
         <strong>Lineups Not Yet Posted</strong>
         Try again once lineups are posted, usually 3-4 hours before first pitch.
         <button class="refresh-btn" onclick="refreshPage()">Refresh</button>
-      </div>`);
+      </div>` + renderHrBacktestPanel());
     savePageCache();
     return;
   }
@@ -1672,7 +1990,7 @@ async function main() {
   const topPicks = limitSameGameAndTeam(top30, 2);
 
   if (!topPicks.length) {
-    show(`<div class="info-box"><strong>No HR Watchlist Yet</strong>Try again once lineups and player stats are available.</div>`);
+    show(renderToolbar() + `<div class="info-box"><strong>No HR Watchlist Yet</strong>Try again once lineups and player stats are available.</div>` + renderHrBacktestPanel());
     savePageCache();
     return;
   }
@@ -1684,6 +2002,7 @@ async function main() {
   show(
     renderSummary(topPicks) +
     renderToolbar() +
+    renderHrBacktestPanel() +
     `<div class="note">Home runs are rare. A 15% chance is a strong HR spot, but it still misses most of the time.</div>` +
     topPicks.map((p, i) => renderCard(p, i)).join('') +
     `<button class="refresh-btn" onclick="refreshPage()">Refresh</button>`

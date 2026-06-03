@@ -1059,7 +1059,7 @@ function platoonLabel(b, p) {
 }
 
 function windDesc(wf, wind) {
-  if (!wind || wind.speed < 8) return null;
+  if (!wind || wind.speed < 8 || wind.deg == null) return null;
   const dir  = ['N','NE','E','SE','S','SW','W','NW'][Math.round(wind.deg / 45) % 8];
   const mph  = Math.round(wind.speed);
   const effect = wf > 1.02 ? 'blowing out' : wf < 0.98 ? 'blowing in' : 'crosswind';
@@ -1644,11 +1644,41 @@ async function copyBacktestAuditRows() {
   );
 }
 
+async function copyBacktestCombinedRows() {
+  if (!lastBacktestAuditRows?.length) {
+    const out = document.getElementById('backtest-output');
+    if (out) out.textContent = 'Run the backtest first, then copy picks plus the full slate audit.';
+    return;
+  }
+
+  const auditDate = lastBacktestAuditRows[0]?.date;
+  const saved = auditDate ? getSavedPicksForDate(auditDate) : null;
+  const pickData = saved ? await getSavedRowsWithResults(saved) : null;
+  const pickRows = pickData
+    ? pickData.rows.map(row => savedPickToAnalysisRow(
+        pickData.saved.date,
+        row.pick,
+        row.result,
+        row.hits,
+        row.atBats
+      ))
+    : [];
+  const auditRows = lastBacktestAuditRows.map(auditRowToAnalysisRow);
+  const rows = [...pickRows, ...auditRows];
+
+  await copyTextToOutput(
+    rowsToTsvWithColumns(ANALYSIS_COLUMNS, rows),
+    `Copied ${pickRows.length} pick rows and ${auditRows.length} audit rows. Paste once into the Hit Analysis tab.`,
+    'backtest-output'
+  );
+}
+
 window.saveCurrentPicks = saveCurrentPicks;
 window.replaceCurrentPicks = replaceCurrentPicks;
 window.checkSavedPicks = checkSavedPicks;
 window.copyAnalysisRowsForSheets = copyAnalysisRowsForSheets;
 window.copyBacktestAuditRows = copyBacktestAuditRows;
+window.copyBacktestCombinedRows = copyBacktestCombinedRows;
 
 function renderBacktestPanel(defaultDate = addDays(todayStr(), -1)) {
   return `
@@ -1678,7 +1708,8 @@ function renderBacktestResult(result) {
     <div>${result.picks} batter-game picks across ${result.games} completed games.</div>
     <div>Brier score: ${result.brier.toFixed(3)} - Overall hit rate: ${Math.round(result.hitRate * 100)}%</div>
     <div>Note: Source=audit rows use fast date-limited stats and skip recent-form refinements plus handedness splits.</div>
-    <button class="refresh-btn" onclick="copyBacktestAuditRows()">Copy full slate audit</button>
+    <button class="refresh-btn" onclick="copyBacktestCombinedRows()">Copy picks + full audit</button>
+    <button class="refresh-btn" onclick="copyBacktestAuditRows()">Copy audit only</button>
     <div style="margin-top:8px">${bucketRows}</div>`;
 }
 
@@ -1915,7 +1946,8 @@ async function main() {
   if (!games.length) {
     show(
       renderPickTracker() +
-      `<div class="info-box"><strong>No Games Today</strong>No MLB games scheduled.</div>`
+      `<div class="info-box"><strong>No Games Today</strong>No MLB games scheduled.</div>` +
+      renderBacktestPanel()
     );
     savePageCache();
     return;
@@ -1941,7 +1973,8 @@ async function main() {
         ${probCount} with probable pitchers set.<br><br>
         Lineups typically post 3–4 hours before first pitch.
         <button class="refresh-btn" onclick="refreshPage()">↻ Refresh</button>
-      </div>`
+      </div>` +
+      renderBacktestPanel()
     );
     savePageCache();
     return;
