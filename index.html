@@ -125,7 +125,10 @@ h1 {
 .card.rank-3::before,
 .card.rank-4::before,
 .card.rank-5::before,
-.card.rank-6::before { background: var(--border); }
+.card.rank-6::before,
+.card.rank-7::before,
+.card.rank-8::before,
+.card.rank-9::before { background: var(--border); }
 
 .rank-label {
   font-size: 0.7rem;
@@ -574,6 +577,7 @@ const MODEL = {
   minBatterPa: 45,
   maxPerPaHit: 0.48,
   calibrationDamp: 0.68,
+  topPickCount: 10,
 };
 
 // Park hit factors by home-team ID (FanGraphs 3-yr regressed hits, 2024)
@@ -612,9 +616,9 @@ const PARK = {
 
 // Platoon multipliers on hit rate (opposite-hand matchups favour the batter)
 const PLATOON = {
-  RvR: 0.96, RvL: 1.06,
-  LvL: 0.94, LvR: 1.07,
-  SvR: 1.04, SvL: 1.04,  // switch hitters always bat from favorable side
+  RvR: 0.99, RvL: 1.02,
+  LvL: 0.98, LvR: 1.02,
+  SvR: 1.01, SvL: 1.01,  // switch hitters keep a small matchup edge
 };
 
 // Stadium location + open-air flag + compass bearing from home plate → CF
@@ -902,8 +906,8 @@ function expectedPAs(lineupPos) {
 }
 
 function ttoFactor(lineupPos) {
-  if (lineupPos <= 2) return 1.025;
-  if (lineupPos <= 4) return 1.015;
+  if (lineupPos <= 3) return 1.065;
+  if (lineupPos <= 5) return 1.030;
   if (lineupPos <= 6) return 1.005;
   return 1.0;
 }
@@ -912,7 +916,7 @@ function calibrateProbability(rawProb, ePAs) {
   const leagueProb = 1 - Math.pow(1 - LEAGUE.hPerPa, ePAs);
   return clamp(
     leagueProb + ((rawProb - leagueProb) * MODEL.calibrationDamp),
-    0.28,
+    0.22,
     0.88
   );
 }
@@ -932,8 +936,8 @@ function hitGameEnvironmentFactors(candidates) {
 
   const factors = new Map();
   for (const [gamePk, picks] of grouped.entries()) {
-    const avgEnv = average(picks.map(p => p.pitcherWeakness * p.parkFactor));
-    factors.set(gamePk, avgEnv == null ? 1.0 : clamp(shrink(avgEnv, 1.0, picks.length, 12), 0.97, 1.03));
+    const avgEnv = average(picks.map(p => p.pitcherWeakness));
+    factors.set(gamePk, avgEnv == null ? 1.0 : clamp(shrink(avgEnv, 1.0, picks.length, 12), 0.99, 1.02));
   }
   return factors;
 }
@@ -961,27 +965,17 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind, gameEnv
     MODEL.batterPaPrior
   );
   const opsAdj = clamp(
-    1 + 0.10 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
-    0.88, 1.18
+    1 + 0.08 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
+    0.92, 1.14
   );
-  const recentRate = batter.recentHPerPa != null
-    ? shrink(batter.recentHPerPa, seasonHPerPa, batter.recentPa || 0, MODEL.recentAbPrior)
-    : null;
-  const recentAdj = recentRate != null
-    ? clamp(1 + 0.12 * (recentRate - seasonHPerPa) / Math.max(seasonHPerPa, 0.05), 0.92, 1.08)
-    : 1.0;
+  const recentAdj = 1.0;
   const contactAdj = clamp(
-    (1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct),
-    0.92, 1.08
+    1 + 0.25 * (((1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct)) - 1),
+    0.97, 1.03
   );
-  const awayRate = awaySplit
-    ? shrink(awaySplit.hPerPa || LEAGUE.hPerPa, batter.hPerPa || LEAGUE.hPerPa, awaySplit.pa, 140)
-    : null;
-  const awayAdj = awayRate != null
-    ? clamp(1 + 0.35 * (awayRate - (batter.hPerPa || LEAGUE.hPerPa)) / Math.max(batter.hPerPa || LEAGUE.hPerPa, 0.05), 0.93, 1.07)
-    : 1.0;
+  const awayAdj = 1.0;
 
-  const batterBase = seasonHPerPa * opsAdj * recentAdj * contactAdj * awayAdj;
+  const batterBase = seasonHPerPa * opsAdj * contactAdj;
 
   // Pitcher weakness relative to league (each ratio > 1 = easier to hit)
   const splitObaa = pitcherSplit
@@ -1013,14 +1007,15 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind, gameEnv
     0.78, 1.25
   );
 
+  const parkAdj = 1.0;
   const wf    = windFactor(wind);
-  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkFactor * wf * gameEnvFactor, 0.04, MODEL.maxPerPaHit);
+  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkAdj * wf * gameEnvFactor, 0.04, MODEL.maxPerPaHit);
   const ePAs  = expectedPAs(lineupPos);
   const rawProb = 1 - Math.pow(1 - pHit, ePAs);
   const prob = calibrateProbability(rawProb, ePAs);
 
   return {
-    prob, rawProb, pHit, seasonHPerPa, platoon, pitcherWeakness, parkFactor, wf,
+    prob, rawProb, pHit, seasonHPerPa, platoon, pitcherWeakness, parkFactor, parkAdj, wf,
     opsAdj, recentAdj, contactAdj, awayAdj, ttoAdj: ttoFactor(lineupPos), gameEnvFactor, ePAs,
     batterHand, pitcherHand, batterSplit, pitcherSplit, awaySplit, isAway,
   };
@@ -1076,11 +1071,7 @@ function hitPickSummary(pick) {
   if (pick.lineupPos <= 3) reasons.push('he bats near the top, so he should get more chances');
   if (pick.pitcherWeakness > 1.06) reasons.push('the opposing pitcher looks hittable');
   if (pick.contactAdj > 1.03) reasons.push('he avoids strikeouts well');
-  if (pick.recentAdj > 1.03) reasons.push('he has been hitting well lately');
   if (pick.platoon > 1.02) reasons.push('the handedness matchup helps him');
-  if (pick.parkFactor > 1.03) reasons.push('the ballpark favors hitters');
-  if (pick.isAway && pick.awayAdj > 1.015) reasons.push('his road hitting profile travels well');
-  if (pick.isAway && pick.awayAdj < 0.985) reasons.push('his road hitting profile is a small concern');
   if (pick.ttoAdj > 1.01) reasons.push('his lineup spot gives him a better shot at seeing a tiring starter');
   if (pick.gameEnvFactor > 1.015) reasons.push('this specific game looks hitter-friendly overall');
   if (pick.gameEnvFactor < 0.985) reasons.push('this specific game looks tougher for hits overall');
@@ -1089,14 +1080,15 @@ function hitPickSummary(pick) {
 }
 
 function renderCard(pick, rank) {
-  const medals = ['🥇 Pick #1','🥈 Pick #2','🥉 Pick #3','4️⃣ Pick #4','5️⃣ Pick #5','6️⃣ Pick #6','7️⃣ Pick #7'];
+  const rankLabel = `Pick #${rank + 1}`;
   const pct    = Math.round(pick.prob * 100);
   const rawPct = Math.round((pick.rawProb ?? pick.prob) * 100);
 
   const parkInfo = PARK[pick.homeTeamId];
   const parkName = parkInfo?.name ?? pick.venue;
-  const parkLabel = pick.parkFactor >= 1.03 ? 'hitter-friendly'
-                  : pick.parkFactor <= 0.96 ? 'pitcher-friendly'
+  const parkValue = pick.parkAdj ?? pick.parkFactor;
+  const parkLabel = parkValue >= 1.01 ? 'hitter-friendly'
+                  : parkValue <= 0.99 ? 'pitcher-friendly'
                   : 'neutral park';
 
   // Pitcher weakness expressed as readable ERA/WHIP string
@@ -1118,7 +1110,7 @@ function renderCard(pick, rank) {
 
   return `
 <div class="card rank-${rank}">
-  <div class="rank-label">${medals[rank]}</div>
+  <div class="rank-label">${rankLabel}</div>
   <div class="batter-name">${pick.batterName}</div>
   <div class="batter-team">${pick.batterTeam}</div>
 
@@ -1192,7 +1184,7 @@ function renderCard(pick, rank) {
     </div>
     <div class="factor">
       <span class="factor-name">Ballpark: ${parkName}</span>
-      <span class="factor-val ${fcls(pick.parkFactor)}">${parkLabel} ${farrow(pick.parkFactor)}</span>
+      <span class="factor-val ${fcls(parkValue)}">${parkLabel} ${farrow(parkValue)}</span>
     </div>
     ${pick.isAway ? `
     <div class="factor">
@@ -1277,6 +1269,11 @@ function storePickPayload(payload) {
   localStorage.setItem(PICK_STORE_KEY, JSON.stringify(payload));
 }
 
+function savedStateStamp(date = currentPickDate) {
+  const saved = date ? getSavedPicksForDate(date) : null;
+  return saved?.savedAt || '';
+}
+
 function hasSavedPicksForDate(date) {
   return !!getPickHistory()[date];
 }
@@ -1313,7 +1310,7 @@ function limitSameGameAndTeam(picks, limit = 2) {
     selected.push(pick);
     gameCounts.set(gameKey, (gameCounts.get(gameKey) || 0) + 1);
     teamCounts.set(teamKey, (teamCounts.get(teamKey) || 0) + 1);
-    if (selected.length >= 7) break;
+    if (selected.length >= MODEL.topPickCount) break;
   }
 
   return selected;
@@ -1339,6 +1336,7 @@ function pickPayload(pick, idx) {
     ttoAdj: pick.ttoAdj,
     gameEnvFactor: pick.gameEnvFactor,
     parkFactor: pick.parkFactor,
+    parkAdj: pick.parkAdj ?? pick.parkFactor,
     recentAdj: pick.recentAdj,
     contactAdj: pick.contactAdj,
     opsAdj: pick.opsAdj,
@@ -1370,6 +1368,7 @@ function saveCurrentPicks() {
 
   const payload = currentPickPayload();
   storePickPayload(payload);
+  currentTopPicks = payload.picks;
   lastCheckedPickRows = null;
   lastCheckedPickDate = null;
   if (out) out.textContent = `Saved ${payload.picks.length} picks for ${formatDate(payload.date)}. Come back after the games finish and tap "Check saved picks."`;
@@ -1385,6 +1384,7 @@ function replaceCurrentPicks() {
 
   const payload = currentPickPayload();
   storePickPayload(payload);
+  currentTopPicks = payload.picks;
   lastCheckedPickRows = null;
   lastCheckedPickDate = null;
   if (out) out.textContent = `Replaced saved picks for ${formatDate(payload.date)} with the ${payload.picks.length} currently displayed picks.`;
@@ -1394,7 +1394,9 @@ function replaceCurrentPicks() {
 function autoSaveCurrentPicks() {
   if (!currentPickDate || !currentTopPicks.length) return;
   if (hasSavedPicksForDate(currentPickDate)) return;
-  storePickPayload(currentPickPayload());
+  const payload = currentPickPayload();
+  storePickPayload(payload);
+  currentTopPicks = payload.picks;
 }
 
 const ANALYSIS_COLUMNS = [
@@ -1459,7 +1461,7 @@ function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '',
     decText(pick.awayAdj),
     decText(pick.ttoAdj),
     decText(pick.gameEnvFactor),
-    decText(pick.parkFactor),
+    decText(pick.parkAdj ?? pick.parkFactor),
     decText(pick.recentAdj),
     decText(pick.contactAdj),
     decText(pick.opsAdj),
@@ -1888,6 +1890,7 @@ async function runBacktest() {
           ttoAdj: s.ttoAdj,
           gameEnvFactor: s.gameEnvFactor,
           parkFactor: s.parkFactor,
+          parkAdj: s.parkAdj,
           recentAdj: s.recentAdj,
           contactAdj: s.contactAdj,
           opsAdj: s.opsAdj,
@@ -2121,7 +2124,7 @@ async function main() {
       pick.pitcher.recentERA = recent?.era ?? null;
       pick.pitcher.recentIp = recent?.ip ?? 0;
     }
-    const wind = null; // fetched per-venue below for final top 6
+    const wind = null; // fetched per-venue below for the final displayed picks
     const gameEnvFactor = gameEnvFactors.get(pick.gamePk) ?? 1.0;
     Object.assign(pick, score(
       pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, wind, gameEnvFactor, pick.side === 'away'
@@ -2204,6 +2207,7 @@ function savePageCache() {
       updatedAt: document.getElementById('updated-at')?.textContent || '',
       currentPickDate,
       currentTopPicks,
+      savedStateStamp: savedStateStamp(currentPickDate),
     }));
   } catch {}
 }
@@ -2212,6 +2216,8 @@ function restorePageCache() {
   try {
     const cached = JSON.parse(sessionStorage.getItem(PAGE_CACHE_KEY) || 'null');
     if (!cached || Date.now() - cached.savedAt > PAGE_CACHE_TTL) return false;
+    const currentStamp = savedStateStamp(cached.currentPickDate);
+    if (cached.savedStateStamp && currentStamp && cached.savedStateStamp !== currentStamp) return false;
     document.getElementById('app').innerHTML = cached.appHtml;
     document.getElementById('date-label').textContent = cached.dateLabel || 'Cached picks';
     document.getElementById('updated-at').textContent = cached.updatedAt || '';

@@ -808,7 +808,7 @@ function calibrateProbability(rawProb, ePAs) {
   return clamp(
     leagueProb + ((rawProb - leagueProb) * MODEL.calibrationDamp),
     0.025,
-    0.28
+    0.33
   );
 }
 
@@ -827,7 +827,7 @@ function hrGameEnvironmentFactors(candidates) {
 
   const factors = new Map();
   for (const [gamePk, picks] of grouped.entries()) {
-    const avgEnv = average(picks.map(p => p.pitcherRisk * p.parkFactor));
+    const avgEnv = average(picks.map(p => p.pitcherRisk * (p.parkAdj ?? p.parkFactor)));
     factors.set(gamePk, avgEnv == null ? 1.0 : clamp(shrink(avgEnv, 1.0, picks.length, 10), 0.90, 1.10));
   }
   return factors;
@@ -862,10 +862,8 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor
     1 + 0.70 * ((splitIso || LEAGUE.iso) - LEAGUE.iso) / LEAGUE.iso,
     0.50, 1.95
   );
-  const contactAdj = clamp(
-    1 + 0.08 * (((1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct)) - 1),
-    0.94, 1.05
-  );
+  const hrParkFactor = clamp(1 + ((parkFactor - 1) * 0.65), 0.92, 1.16);
+  const contactAdj = 1.0;
   const recentRate = batter.recentHrPerPa != null
     ? shrink(batter.recentHrPerPa, seasonHrRate, batter.recentPa || 0, MODEL.recentPaPrior)
     : null;
@@ -902,14 +900,14 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor
     shrink(rawPitcherRisk, 1.0, pitcher.ip || 0, MODEL.pitcherIpPrior) * ttoFactor(lineupPos),
     0.78, 1.38
   );
-  const rawPHr = seasonHrRate * isoAdj * contactAdj * recentAdj * awayAdj * pitcherRisk * platoon * parkFactor * gameEnvFactor;
+  const rawPHr = seasonHrRate * isoAdj * contactAdj * recentAdj * awayAdj * pitcherRisk * platoon * hrParkFactor * gameEnvFactor;
   const pHr = clamp(softCap(rawPHr, MODEL.maxHrPerPa), 0.003, MODEL.maxHrPerPa);
   const rawProb = 1 - Math.pow(1 - pHr, ePAs);
   const prob = calibrateProbability(rawProb, ePAs);
 
   return {
     prob, rawProb, pHr, seasonHrRate,
-    isoAdj, contactAdj, recentAdj, awayAdj, pitcherRisk, platoon, parkFactor, ttoAdj: ttoFactor(lineupPos), gameEnvFactor,
+    isoAdj, contactAdj, recentAdj, awayAdj, pitcherRisk, platoon, parkFactor, parkAdj: hrParkFactor, ttoAdj: ttoFactor(lineupPos), gameEnvFactor,
     ePAs, batterHand, pitcherHand: pitcher.hand, batterSplit, pitcherSplit, awaySplit, isAway,
   };
 }
@@ -957,7 +955,7 @@ function hrPickSummary(pick) {
   if (pick.isoAdj > 1.08) reasons.push('his power profile stands out');
   if (pick.pitcherRisk > 1.06) reasons.push('the pitcher is allowing more HR risk than average');
   if (pick.pitcher.recentHr9 != null && pick.pitcher.recentHr9 > LEAGUE.hr9 * 1.2) reasons.push('the pitcher has allowed recent home run damage');
-  if (pick.parkFactor > 1.04) reasons.push('the ballpark helps home runs');
+  if ((pick.parkAdj ?? pick.parkFactor) > 1.04) reasons.push('the ballpark helps home runs');
   if (pick.lineupPos <= 3) reasons.push('he should get more trips to the plate');
   if (pick.platoon > 1.02) reasons.push('the handedness matchup helps');
   if (pick.recentAdj > 1.03) reasons.push('his recent power trend is positive');
@@ -1106,7 +1104,7 @@ function renderCard(pick, rank) {
     </div>
     <div class="factor">
       <span class="factor-name">Ballpark: ${parkName}</span>
-      <span class="factor-val ${fcls(pick.parkFactor)}">${factorText(pick.parkFactor)}</span>
+      <span class="factor-val ${fcls(pick.parkAdj ?? pick.parkFactor)}">${factorText(pick.parkAdj ?? pick.parkFactor)}</span>
     </div>
     ${pick.isAway ? `
     <div class="factor">
@@ -1142,6 +1140,7 @@ function savePageCache() {
       updatedAt: document.getElementById('updated-at')?.textContent || '',
       currentHrDate,
       currentHrPicks,
+      savedStateStamp: savedHrStateStamp(currentHrDate),
     }));
   } catch {}
 }
@@ -1150,6 +1149,8 @@ function restorePageCache() {
   try {
     const cached = JSON.parse(sessionStorage.getItem(PAGE_CACHE_KEY) || 'null');
     if (!cached || Date.now() - cached.savedAt > PAGE_CACHE_TTL) return false;
+    const currentStamp = savedHrStateStamp(cached.currentHrDate);
+    if (cached.savedStateStamp && currentStamp && cached.savedStateStamp !== currentStamp) return false;
     document.getElementById('app').innerHTML = cached.appHtml;
     document.getElementById('date-label').textContent = cached.dateLabel || 'Cached watchlist';
     document.getElementById('updated-at').textContent = cached.updatedAt || '';
@@ -1291,6 +1292,11 @@ function storeHrPickPayload(payload) {
   localStorage.setItem(HR_PICK_STORE_KEY, JSON.stringify(payload));
 }
 
+function savedHrStateStamp(date = currentHrDate) {
+  const saved = date ? getSavedHrPicksForDate(date) : null;
+  return saved?.savedAt || '';
+}
+
 function hasSavedHrPicksForDate(date) {
   return !!getHrPickHistory()[date];
 }
@@ -1312,6 +1318,7 @@ function hrPickPayload(pick, idx) {
     ttoAdj: pick.ttoAdj,
     gameEnvFactor: pick.gameEnvFactor,
     parkFactor: pick.parkFactor,
+    parkAdj: pick.parkAdj ?? pick.parkFactor,
     recentAdj: pick.recentAdj,
     contactAdj: pick.contactAdj,
     platoon: pick.platoon,
@@ -1341,6 +1348,7 @@ function saveCurrentHrPicks() {
     picks: currentHrPicks.map(hrPickPayload),
   };
   storeHrPickPayload(payload);
+  currentHrPicks = payload.picks;
   lastCheckedHrRows = null;
   lastCheckedHrDate = null;
   if (out) out.textContent = `Saved ${payload.picks.length} HR picks for ${formatDate(payload.date)}.`;
@@ -1359,6 +1367,7 @@ function replaceCurrentHrPicks() {
     picks: currentHrPicks.map(hrPickPayload),
   };
   storeHrPickPayload(payload);
+  currentHrPicks = payload.picks;
   lastCheckedHrRows = null;
   lastCheckedHrDate = null;
   if (out) out.textContent = `Replaced saved HR picks for ${formatDate(payload.date)} with the ${payload.picks.length} currently displayed picks.`;
@@ -1374,6 +1383,7 @@ function autoSaveCurrentHrPicks() {
     picks: currentHrPicks.map(hrPickPayload),
   };
   storeHrPickPayload(payload);
+  currentHrPicks = payload.picks;
 }
 
 function decText(value, places = 3) {
@@ -1398,7 +1408,7 @@ function hrAnalysisRow(date, pick, result = '', hr = '', source = 'pick') {
     decText(pick.awayAdj),
     decText(pick.ttoAdj),
     decText(pick.gameEnvFactor),
-    decText(pick.parkFactor),
+    decText(pick.parkAdj ?? pick.parkFactor),
     decText(pick.recentAdj),
     decText(pick.contactAdj),
     decText(pick.platoon),
@@ -1751,6 +1761,7 @@ async function runHrBacktest() {
           ttoAdj: s.ttoAdj,
           gameEnvFactor: s.gameEnvFactor,
           parkFactor: s.parkFactor,
+          parkAdj: s.parkAdj,
           recentAdj: s.recentAdj,
           contactAdj: s.contactAdj,
           platoon: s.platoon,
