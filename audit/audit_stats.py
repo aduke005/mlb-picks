@@ -144,6 +144,15 @@ def analyze(label, rows, chance_col, factors):
             )
 
 
+def rows_matching(all_rows, label, prefer=None):
+    names = [name for name in all_rows if label.lower() in name.lower()]
+    if prefer:
+        preferred = [name for name in names if prefer.lower() in name.lower()]
+        if preferred:
+            names = preferred
+    return [row for name in names for row in all_rows[name]]
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: python audit_stats.py workbook.xlsx")
@@ -153,12 +162,8 @@ def main():
         for name, path in load_sheets(zf):
             all_rows[name] = rows_for_sheet(zf, name, path, shared)
 
-    hr_rows = all_rows.get(" HR Analysis v2", []) + all_rows.get("HR Analysis v2-more", [])
-    if not hr_rows:
-        hr_rows = all_rows.get("HR Analysis v2", []) + all_rows.get("HR Analysis v2-more", [])
-    hit_rows = all_rows.get(" Hit Analysis v2", []) + all_rows.get("Hit Analysis v2-more", [])
-    if not hit_rows:
-        hit_rows = all_rows.get("Hit Analysis v2", []) + all_rows.get("Hit Analysis v2-more", [])
+    hr_rows = rows_matching(all_rows, "HR Analysis", prefer="v2")
+    hit_rows = rows_matching(all_rows, "Hit Analysis", prefer="v2")
 
     analyze(
         "HR v2 combined",

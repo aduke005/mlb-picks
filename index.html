@@ -901,15 +901,17 @@ function windFactor(wind) {
 
 function expectedPAs(lineupPos) {
   // 1-indexed batting order position
-  const table = [4.7, 4.5, 4.3, 4.1, 4.0, 3.9, 3.8, 3.6, 3.5];
+  const table = [4.2, 4.15, 4.1, 4.05, 4.0, 3.95, 3.9, 3.85, 3.8];
   return table[clamp(lineupPos - 1, 0, 8)];
 }
 
 function ttoFactor(lineupPos) {
-  if (lineupPos <= 3) return 1.065;
-  if (lineupPos <= 5) return 1.030;
-  if (lineupPos <= 6) return 1.005;
-  return 1.0;
+  const pos = Number(lineupPos);
+  if (!Number.isFinite(pos)) return 1.0;
+  if (pos <= 2) return 1.020;
+  if (pos <= 5) return 1.010;
+  if (pos <= 6) return 1.000;
+  return 0.985;
 }
 
 function calibrateProbability(rawProb, ePAs) {
@@ -1007,7 +1009,11 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind, gameEnv
     0.78, 1.25
   );
 
-  const parkAdj = 1.0;
+  const parkAdj = clamp(
+    1 + (((Number(parkFactor) || 1.0) - 1) * 0.25),
+    0.97,
+    1.05
+  );
   const wf    = windFactor(wind);
   const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkAdj * wf * gameEnvFactor, 0.04, MODEL.maxPerPaHit);
   const ePAs  = expectedPAs(lineupPos);
@@ -1197,7 +1203,7 @@ function renderCard(pick, rank) {
     </div>
     <div class="factor">
       <span class="factor-name">Batting order #${pick.lineupPos} (~${pick.ePAs.toFixed(1)} trips)</span>
-      <span class="factor-val ${pick.lineupPos <= 3 ? 'good' : pick.lineupPos >= 7 ? 'neutral' : 'neutral'}">${pick.lineupPos <= 3 ? 'More chances' : 'Typical chances'}</span>
+      <span class="factor-val ${pick.lineupPos <= 3 ? 'good' : pick.lineupPos >= 7 ? 'bad' : 'neutral'}">${pick.lineupPos <= 3 ? 'More chances' : pick.lineupPos >= 7 ? 'Fewer chances' : 'Typical chances'}</span>
     </div>
     <div class="factor">
       <span class="factor-name">Starter fatigue chance</span>
