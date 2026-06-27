@@ -123,7 +123,7 @@ h1 {
 
 .summary-row {
   display: grid;
-  grid-template-columns: 42px 1fr 58px;
+  grid-template-columns: 42px 1fr 74px 58px;
   gap: 8px;
   align-items: center;
   min-height: 42px;
@@ -145,6 +145,15 @@ h1 {
   font-weight: 650;
   line-height: 1.15;
   overflow-wrap: anywhere;
+}
+
+.summary-time {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .summary-pct {
@@ -559,9 +568,9 @@ const HR_PARK = {
 };
 
 const PLATOON = {
-  RvR: 0.96, RvL: 1.09,
-  LvL: 0.92, LvR: 1.09,
-  SvR: 1.04, SvL: 1.04,
+  RvR: 1.00, RvL: 1.00,
+  LvL: 1.00, LvR: 1.00,
+  SvR: 1.00, SvL: 1.00,
 };
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
@@ -819,16 +828,9 @@ function average(values) {
 }
 
 function hrGameEnvironmentFactors(candidates) {
-  const grouped = new Map();
-  for (const pick of candidates) {
-    if (!grouped.has(pick.gamePk)) grouped.set(pick.gamePk, []);
-    grouped.get(pick.gamePk).push(pick);
-  }
-
   const factors = new Map();
-  for (const [gamePk, picks] of grouped.entries()) {
-    const avgEnv = average(picks.map(p => p.pitcherRisk * (p.parkAdj ?? p.parkFactor)));
-    factors.set(gamePk, avgEnv == null ? 1.0 : clamp(shrink(avgEnv, 1.0, picks.length, 10), 0.90, 1.10));
+  for (const pick of candidates) {
+    factors.set(pick.gamePk, 1.0);
   }
   return factors;
 }
@@ -864,18 +866,8 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor
   );
   const hrParkFactor = clamp(1 + ((parkFactor - 1) * 0.65), 0.92, 1.16);
   const contactAdj = 1.0;
-  const recentRate = batter.recentHrPerPa != null
-    ? shrink(batter.recentHrPerPa, seasonHrRate, batter.recentPa || 0, MODEL.recentPaPrior)
-    : null;
-  const recentAdj = recentRate != null
-    ? clamp(1 + 0.30 * (recentRate - seasonHrRate) / Math.max(seasonHrRate, 0.01), 0.85, 1.20)
-    : 1.0;
-  const awayHrRate = awaySplit
-    ? shrink(awaySplit.hrPerPa || LEAGUE.hrPerPa, batter.hrPerPa || LEAGUE.hrPerPa, awaySplit.pa, 160)
-    : null;
-  const awayAdj = awayHrRate != null
-    ? clamp(1 + 0.40 * (awayHrRate - (batter.hrPerPa || LEAGUE.hrPerPa)) / Math.max(batter.hrPerPa || LEAGUE.hrPerPa, 0.01), 0.88, 1.12)
-    : 1.0;
+  const recentAdj = 1.0;
+  const awayAdj = 1.0;
   const splitHr9 = pitcherSplit
     ? shrink(pitcherSplit.hr9 || LEAGUE.hr9, pitcher.hr9 || LEAGUE.hr9, pitcherSplit.pa, 120)
     : pitcher.hr9;
@@ -976,6 +968,7 @@ function renderSummary(picks) {
     <div class="summary-row">
       <div class="summary-rank">#${i + 1}</div>
       <div class="summary-name">${pick.batterName}</div>
+      <div class="summary-time">${pick.gameTime || ''}</div>
       <div class="summary-pct">${fmtPct(pick.prob)}</div>
     </div>`).join('')}
 </div>`;

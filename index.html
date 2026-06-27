@@ -342,7 +342,7 @@ h1 {
 
 .summary-row {
   display: grid;
-  grid-template-columns: 42px 1fr 58px;
+  grid-template-columns: 42px 1fr 74px 58px;
   gap: 8px;
   align-items: center;
   min-height: 42px;
@@ -364,6 +364,15 @@ h1 {
   font-weight: 650;
   line-height: 1.15;
   overflow-wrap: anywhere;
+}
+
+.summary-time {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 650;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .summary-pct {
@@ -576,7 +585,8 @@ const MODEL = {
   recentAbPrior: 45,
   minBatterPa: 45,
   maxPerPaHit: 0.48,
-  calibrationDamp: 0.68,
+  calibrationDamp: 0.80,
+  recentDays: 21,
   topPickCount: 10,
 };
 
@@ -616,9 +626,9 @@ const PARK = {
 
 // Platoon multipliers on hit rate (opposite-hand matchups favour the batter)
 const PLATOON = {
-  RvR: 0.99, RvL: 1.02,
-  LvL: 0.98, LvR: 1.02,
-  SvR: 1.01, SvL: 1.01,  // switch hitters keep a small matchup edge
+  RvR: 1.00, RvL: 1.00,
+  LvL: 1.00, LvR: 1.00,
+  SvR: 1.00, SvL: 1.00,  // audit has not shown a reliable hit-rate edge here
 };
 
 // Stadium location + open-air flag + compass bearing from home plate → CF
@@ -901,17 +911,17 @@ function windFactor(wind) {
 
 function expectedPAs(lineupPos) {
   // 1-indexed batting order position
-  const table = [4.2, 4.15, 4.1, 4.05, 4.0, 3.95, 3.9, 3.85, 3.8];
+  const table = [4.7, 4.5, 4.3, 4.1, 4.0, 3.9, 3.8, 3.6, 3.5];
   return table[clamp(lineupPos - 1, 0, 8)];
 }
 
 function ttoFactor(lineupPos) {
   const pos = Number(lineupPos);
   if (!Number.isFinite(pos)) return 1.0;
-  if (pos <= 2) return 1.020;
-  if (pos <= 5) return 1.010;
-  if (pos <= 6) return 1.000;
-  return 0.985;
+  if (pos <= 3) return 1.065;
+  if (pos <= 5) return 1.030;
+  if (pos <= 6) return 1.005;
+  return 1.0;
 }
 
 function calibrateProbability(rawProb, ePAs) {
@@ -970,14 +980,20 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind, gameEnv
     1 + 0.08 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
     0.92, 1.14
   );
-  const recentAdj = 1.0;
+  const recentAdj = batter.recentHPerPa != null
+    ? clamp(
+        1 + 0.15 * (batter.recentHPerPa - seasonHPerPa) / Math.max(seasonHPerPa, 0.05),
+        0.90,
+        1.10
+      )
+    : 1.0;
   const contactAdj = clamp(
     1 + 0.25 * (((1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct)) - 1),
-    0.97, 1.03
+    0.92, 1.08
   );
   const awayAdj = 1.0;
 
-  const batterBase = seasonHPerPa * opsAdj * contactAdj;
+  const batterBase = seasonHPerPa * opsAdj * recentAdj * contactAdj;
 
   // Pitcher weakness relative to league (each ratio > 1 = easier to hit)
   const splitObaa = pitcherSplit
@@ -1009,11 +1025,7 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind, gameEnv
     0.78, 1.25
   );
 
-  const parkAdj = clamp(
-    1 + (((Number(parkFactor) || 1.0) - 1) * 0.25),
-    0.97,
-    1.05
-  );
+  const parkAdj = 1.0;
   const wf    = windFactor(wind);
   const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkAdj * wf * gameEnvFactor, 0.04, MODEL.maxPerPaHit);
   const ePAs  = expectedPAs(lineupPos);
@@ -1107,7 +1119,7 @@ function renderCard(pick, rank) {
   const hasRecent = pick.batter.recentAvg != null;
   const recentCls  = hasRecent ? fcls(pick.recentAdj) : 'neutral';
   const recentText = hasRecent
-    ? `${fmtAvg(pick.batter.recentAvg)} last 15 days (${pick.batter.recentAb} at-bats) ${farrow(pick.recentAdj)}`
+    ? `${fmtAvg(pick.batter.recentAvg)} last ${MODEL.recentDays} days (${pick.batter.recentAb} at-bats) ${farrow(pick.recentAdj)}`
     : 'no recent data';
 
   // Wind
@@ -1228,6 +1240,7 @@ function renderSummary(picks) {
     <div class="summary-row">
       <div class="summary-rank">#${i + 1}</div>
       <div class="summary-name">${pick.batterName}</div>
+      <div class="summary-time">${pick.gameTime || ''}</div>
       <div class="summary-pct">${Math.round(pick.prob * 100)}%</div>
     </div>`).join('')}
 </div>`;
@@ -1955,7 +1968,7 @@ window.runBacktest = runBacktest;
 
 async function main() {
   const date     = todayStr();
-  const startDate = recentStartDate(15);
+  const startDate = recentStartDate(MODEL.recentDays);
 
   document.getElementById('date-label').textContent = formatDate(date);
   setUpdatedAt();
