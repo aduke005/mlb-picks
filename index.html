@@ -1254,7 +1254,7 @@ function getLatestPastSavedPicks() {
 }
 
 function getSavedPicksForResults() {
-  return getLatestPastSavedPicks() || getLatestSavedPicks();
+  return (currentPickDate && getSavedPicksForDate(currentPickDate)) || getLatestPastSavedPicks() || getLatestSavedPicks();
 }
 
 function pickSavedPayload(history, options = {}) {
@@ -1288,7 +1288,7 @@ function renderPickTracker() {
   const saved = (currentPickDate && getSavedPicksForDate(currentPickDate)) || getSavedPicksForResults();
   const savedText = saved
     ? `Saved ${saved.picks.length} picks for ${formatDate(saved.date)}. This browser remembers the latest saved day.`
-    : 'The first loaded list auto-saves for tracking. Save locks that day unless you explicitly replace it.';
+    : 'Save today\'s picks when you want this displayed list to become the locked list for tracking.';
 
   return `
 <div class="tracker">
@@ -1296,7 +1296,8 @@ function renderPickTracker() {
   <div class="tracker-actions">
     <button onclick="saveCurrentPicks()">Save today's picks</button>
     <button onclick="replaceCurrentPicks()">Replace saved picks</button>
-    <button onclick="checkSavedPicks()">Check saved picks</button>
+    <button onclick="checkTodaysSavedPicks()">Check today's picks</button>
+    <button onclick="checkPastSavedPicks()">Check past picks</button>
     <button onclick="copyAnalysisRowsForSheets()">Copy hit analysis</button>
   </div>
   <div class="tracker-output" id="tracker-output">${savedText}</div>
@@ -1547,11 +1548,10 @@ function renderSavedPickResults(saved, rows) {
     <div style="margin-top:8px">${list}</div>`;
 }
 
-async function checkSavedPicks() {
+async function checkSavedPicks(saved = getSavedPicksForResults(), missingText = 'No saved picks yet. Tap "Save today\'s picks" first.') {
   const out = document.getElementById('tracker-output');
-  const saved = getSavedPicksForResults();
   if (!saved?.picks?.length) {
-    if (out) out.textContent = 'No saved picks yet. Tap "Save today\'s picks" first.';
+    if (out) out.textContent = missingText;
     return;
   }
 
@@ -1586,6 +1586,20 @@ async function checkSavedPicks() {
   } catch (e) {
     if (out) out.innerHTML = `<span class="bad">Could not check saved picks: ${e.message}</span>`;
   }
+}
+
+async function checkTodaysSavedPicks() {
+  await checkSavedPicks(
+    getSavedPicksForDate(todayStr()),
+    'No saved picks for today yet. Tap "Save today\'s picks" first.'
+  );
+}
+
+async function checkPastSavedPicks() {
+  await checkSavedPicks(
+    getLatestPastSavedPicks(),
+    'No saved past picks yet.'
+  );
 }
 
 async function getSavedRowsWithResults(saved = getSavedPicksForResults()) {
@@ -1684,6 +1698,8 @@ async function copyBacktestCombinedRows() {
 window.saveCurrentPicks = saveCurrentPicks;
 window.replaceCurrentPicks = replaceCurrentPicks;
 window.checkSavedPicks = checkSavedPicks;
+window.checkTodaysSavedPicks = checkTodaysSavedPicks;
+window.checkPastSavedPicks = checkPastSavedPicks;
 window.copyAnalysisRowsForSheets = copyAnalysisRowsForSheets;
 window.copyBacktestAuditRows = copyBacktestAuditRows;
 window.copyBacktestCombinedRows = copyBacktestCombinedRows;
@@ -2171,7 +2187,6 @@ async function main() {
 
   currentPickDate = date;
   currentTopPicks = topPicks;
-  autoSaveCurrentPicks();
 
   show(
     renderSummary(topPicks) +

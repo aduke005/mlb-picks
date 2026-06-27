@@ -985,13 +985,14 @@ function renderToolbar() {
   const saved = (currentHrDate && getSavedHrPicksForDate(currentHrDate)) || getSavedHrPicksForResults();
   const savedText = saved
     ? `Saved ${saved.picks.length} HR picks for ${formatDate(saved.date)}.`
-    : 'The first loaded HR list auto-saves for tracking. Save locks that day unless you explicitly replace it.';
+    : 'Save this HR list when you want it to become the locked list for tracking.';
   return `
 <div class="toolbar">
   <div class="tracker-actions">
     <button onclick="saveCurrentHrPicks()">Save HR picks</button>
     <button onclick="replaceCurrentHrPicks()">Replace saved HR picks</button>
-    <button onclick="checkSavedHrPicks()">Check saved HR picks</button>
+    <button onclick="checkTodaysSavedHrPicks()">Check today's HR picks</button>
+    <button onclick="checkPastSavedHrPicks()">Check past HR picks</button>
     <button onclick="copyHrAnalysisRowsForSheets()">Copy HR analysis</button>
   </div>
   <div class="toolbar-output" id="hr-toolbar-output">${savedText}</div>
@@ -1271,7 +1272,7 @@ function getLatestPastSavedHrPicks() {
 }
 
 function getSavedHrPicksForResults() {
-  return getLatestPastSavedHrPicks() || getLatestSavedHrPicks();
+  return (currentHrDate && getSavedHrPicksForDate(currentHrDate)) || getLatestPastSavedHrPicks() || getLatestSavedHrPicks();
 }
 
 function pickSavedPayload(history, options = {}) {
@@ -1546,11 +1547,10 @@ async function getPitcherInfoThroughDate(id, endDate) {
   }
 }
 
-async function checkSavedHrPicks() {
+async function checkSavedHrPicks(saved = getSavedHrPicksForResults(), missingText = 'No saved HR picks yet. Tap "Save HR picks" first.') {
   const out = document.getElementById('hr-toolbar-output');
-  const saved = getSavedHrPicksForResults();
   if (!saved?.picks?.length) {
-    if (out) out.textContent = 'No saved HR picks yet. Tap "Save HR picks" first.';
+    if (out) out.textContent = missingText;
     return;
   }
 
@@ -1582,6 +1582,20 @@ async function checkSavedHrPicks() {
   } catch (e) {
     if (out) out.innerHTML = `<span class="bad">Could not check saved HR picks: ${e.message}</span>`;
   }
+}
+
+async function checkTodaysSavedHrPicks() {
+  await checkSavedHrPicks(
+    getSavedHrPicksForDate(todayStr()),
+    'No saved HR picks for today yet. Tap "Save HR picks" first.'
+  );
+}
+
+async function checkPastSavedHrPicks() {
+  await checkSavedHrPicks(
+    getLatestPastSavedHrPicks(),
+    'No saved past HR picks yet.'
+  );
 }
 
 async function getSavedHrRowsWithResults(saved = getSavedHrPicksForResults()) {
@@ -1833,6 +1847,8 @@ async function copyHrBacktestCombinedRows() {
 window.saveCurrentHrPicks = saveCurrentHrPicks;
 window.replaceCurrentHrPicks = replaceCurrentHrPicks;
 window.checkSavedHrPicks = checkSavedHrPicks;
+window.checkTodaysSavedHrPicks = checkTodaysSavedHrPicks;
+window.checkPastSavedHrPicks = checkPastSavedHrPicks;
 window.copyHrAnalysisRowsForSheets = copyHrAnalysisRowsForSheets;
 window.runHrBacktest = runHrBacktest;
 window.copyHrBacktestAuditRows = copyHrBacktestAuditRows;
@@ -2008,7 +2024,6 @@ async function main() {
 
   currentHrDate = date;
   currentHrPicks = topPicks;
-  autoSaveCurrentHrPicks();
 
   show(
     renderSummary(topPicks) +
