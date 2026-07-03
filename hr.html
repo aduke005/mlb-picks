@@ -133,6 +133,18 @@ h1 {
 
 .summary-title + .summary-row { border-top: 0; }
 
+.summary-tier {
+  padding: 8px 12px 4px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.summary-title + .summary-tier { border-top: 0; }
+
 .summary-rank {
   color: var(--muted);
   font-size: 0.78rem;
@@ -163,6 +175,29 @@ h1 {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+.model-compare {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 750;
+  line-height: 1.4;
+}
+
+.model-chip.current { color: var(--green); }
+.model-chip.classic { color: var(--blue); }
 
 .note {
   background: var(--surface);
@@ -904,6 +939,59 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor
   };
 }
 
+const CLASSIC_PLATOON = {
+  RvR: 0.96, RvL: 1.09,
+  LvL: 0.92, LvR: 1.09,
+  SvR: 1.04, SvL: 1.04,
+};
+
+function classicScore(batter, pitcher, parkFactor, batterHand, lineupPos) {
+  const platoon = CLASSIC_PLATOON[`${batterHand}v${pitcher.hand}`] ?? 1.0;
+  const ePAs = expectedPAs(lineupPos);
+  const seasonHrRate = shrink(
+    batter.hrPerPa || LEAGUE.hrPerPa,
+    LEAGUE.hrPerPa,
+    batter.pa || 0,
+    220
+  );
+  const isoAdj = clamp(
+    1 + 0.60 * ((batter.iso || LEAGUE.iso) - LEAGUE.iso) / LEAGUE.iso,
+    0.55, 1.85
+  );
+  const slgAdj = clamp(
+    1 + 0.10 * ((batter.slg || LEAGUE.slg) - LEAGUE.slg) / LEAGUE.slg,
+    0.90, 1.15
+  );
+  const contactAdj = clamp(
+    (1 - (batter.kPct ?? LEAGUE.kPct)) / (1 - LEAGUE.kPct),
+    0.78, 1.12
+  );
+  const recentRate = batter.recentHrPerPa != null
+    ? shrink(batter.recentHrPerPa, seasonHrRate, batter.recentPa || 0, 35)
+    : null;
+  const recentAdj = recentRate != null
+    ? clamp(1 + 0.30 * (recentRate - seasonHrRate) / Math.max(seasonHrRate, 0.01), 0.85, 1.20)
+    : 1.0;
+  const rawPitcherRisk = clamp(
+    ((pitcher.hr9 || LEAGUE.hr9) / LEAGUE.hr9) * 0.55 +
+    (LEAGUE.k9 / Math.max(pitcher.k9 || LEAGUE.k9, 1)) * 0.25 +
+    ((pitcher.era || LEAGUE.era) / LEAGUE.era) * 0.10 +
+    ((pitcher.whip || LEAGUE.whip) / LEAGUE.whip) * 0.10,
+    0.65, 1.65
+  );
+  const pitcherRisk = clamp(
+    shrink(rawPitcherRisk, 1.0, pitcher.ip || 0, 60),
+    0.78, 1.38
+  );
+  const rawPHr = seasonHrRate * isoAdj * slgAdj * contactAdj * recentAdj * pitcherRisk * platoon * parkFactor;
+  const pHr = clamp(softCap(rawPHr, MODEL.maxHrPerPa), 0.003, MODEL.maxHrPerPa);
+  const rawProb = 1 - Math.pow(1 - pHr, ePAs);
+  const leagueProb = 1 - Math.pow(1 - LEAGUE.hrPerPa, ePAs);
+  const prob = clamp(leagueProb + ((rawProb - leagueProb) * 0.72), 0.025, 0.28);
+
+  return { prob, rawProb, pHr, isoAdj, slgAdj, contactAdj, recentAdj, pitcherRisk, platoon };
+}
+
 function fmtPct(n) { return `${Math.round(n * 100)}%`; }
 function fmtRate(n) {
   if (n == null || isNaN(n)) return '.---';
@@ -965,9 +1053,16 @@ function renderSummary(picks) {
 <div class="summary-list">
   <div class="summary-title">Quick HR Watchlist</div>
   ${picks.map((pick, i) => `
+    ${i === 0 ? '<div class="summary-tier">Best HR shots</div>' : ''}
+    ${i === 5 ? '<div class="summary-tier">Long-shot watchlist</div>' : ''}
     <div class="summary-row">
       <div class="summary-rank">#${i + 1}</div>
-      <div class="summary-name">${pick.batterName}</div>
+      <div class="summary-name">${pick.batterName}
+        <div class="model-compare">
+          <span class="model-chip current">Cur #${pick.currentRank ?? '?'}</span>
+          <span class="model-chip classic">Cls #${pick.classicRank ?? '?'}</span>
+        </div>
+      </div>
       <div class="summary-time">${pick.gameTime || ''}</div>
       <div class="summary-pct">${fmtPct(pick.prob)}</div>
     </div>`).join('')}
@@ -1005,31 +1100,65 @@ function limitSameGameAndTeam(picks, limit = 2) {
     selected.push(pick);
     gameCounts.set(gameKey, (gameCounts.get(gameKey) || 0) + 1);
     teamCounts.set(teamKey, (teamCounts.get(teamKey) || 0) + 1);
-    if (selected.length >= 7) break;
+    if (selected.length >= 10) break;
   }
 
   return selected;
 }
 
+function rankPicks(picks, field, rankField) {
+  [...picks]
+    .sort((a, b) => b[field] - a[field])
+    .forEach((pick, i) => { pick[rankField] = i + 1; });
+}
+
+function mergedModelPicks(picks) {
+  rankPicks(picks, 'prob', 'currentRank');
+  rankPicks(picks, 'classicProb', 'classicRank');
+
+  const currentTop = limitSameGameAndTeam([...picks].sort((a, b) => b.prob - a.prob), 2);
+  const classicTop = limitSameGameAndTeam([...picks].sort((a, b) => b.classicProb - a.classicProb), 2);
+  const merged = new Map();
+
+  for (const pick of currentTop) merged.set(pick.key, { ...pick, inCurrentTop: true, inClassicTop: false });
+  for (const pick of classicTop) {
+    const existing = merged.get(pick.key);
+    if (existing) existing.inClassicTop = true;
+    else merged.set(pick.key, { ...pick, inCurrentTop: false, inClassicTop: true });
+  }
+
+  return [...merged.values()].sort((a, b) => {
+    const aBest = Math.min(a.currentRank || 999, a.classicRank || 999);
+    const bBest = Math.min(b.currentRank || 999, b.classicRank || 999);
+    return aBest - bBest || b.prob - a.prob;
+  });
+}
+
 function renderCard(pick, rank) {
   const medals = ['Pick #1','Pick #2','Pick #3','Pick #4','Pick #5','Pick #6','Pick #7'];
+  const rankLabel = medals[rank] || `Pick #${rank + 1}`;
   const parkInfo = HR_PARK[pick.homeTeamId];
   const parkName = parkInfo?.name ?? pick.venue;
   const tier = hrTier(pick.prob);
   const hasRecent = pick.batter.recentHr != null;
+  const classicPct = pick.classicProb != null ? fmtPct(pick.classicProb) : null;
   const recentText = hasRecent
     ? `${pick.batter.recentHr} HR in last ${pick.batter.recentPa} trips`
     : 'no recent power sample';
 
   return `
 <div class="card rank-${rank}">
-  <div class="rank-label">${medals[rank]}</div>
+  <div class="rank-label">${rankLabel}</div>
   <div class="batter-name">${pick.batterName}</div>
   <div class="batter-team">${pick.batterTeam}</div>
 
   <div class="prob-row">
     <div class="prob-pct">${fmtPct(pick.prob)}</div>
     <div class="prob-label">estimated<br>HR chance</div>
+  </div>
+  <div class="model-compare">
+    <span class="model-chip current">Current #${pick.currentRank ?? '?'} ${fmtPct(pick.prob)}</span>
+    ${classicPct != null ? `<span class="model-chip classic">Classic #${pick.classicRank ?? '?'} ${classicPct}</span>` : ''}
   </div>
   <div class="inline-note">Before calibration: ${fmtPct(pick.rawProb)} - single-trip HR rate: ${fmtPct(pick.pHr)}</div>
   <div class="inline-note ${tier.cls}">${tier.label}</div>
@@ -1901,6 +2030,7 @@ async function main() {
       players.forEach((p, idx) => {
         batterIds.add(p.id);
         lineupEntries.push({
+          key: `${g.gamePk}-${p.id}-${idx}`,
           id: p.id,
           side,
           name: p.fullName,
@@ -1947,7 +2077,9 @@ async function main() {
     const pitcher = pitcherInfo[meta.pitcher.id];
     if (!pitcher) continue;
     const s = score(batter, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos, 1.0, meta.side === 'away');
+    const classic = classicScore(batter, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos);
     candidates.push({
+      key: meta.key,
       batterId: meta.id,
       side: meta.side,
       batterName: meta.name,
@@ -1965,6 +2097,8 @@ async function main() {
       batter: { ...batter },
       pitcher,
       ...s,
+      classicProb: classic.prob,
+      classicPHr: classic.pHr,
     });
   }
 
@@ -1974,9 +2108,17 @@ async function main() {
     Object.assign(pick, score(
       pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, gameEnvFactor, pick.side === 'away'
     ));
+    const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos);
+    pick.classicProb = classic.prob;
+    pick.classicPHr = classic.pHr;
   }
-  candidates.sort((a, b) => b.prob - a.prob);
-  const top30 = candidates.slice(0, 30);
+  rankPicks(candidates, 'prob', 'currentRank');
+  rankPicks(candidates, 'classicProb', 'classicRank');
+  const top30Keys = new Set([
+    ...[...candidates].sort((a, b) => b.prob - a.prob).slice(0, 30).map(p => p.key),
+    ...[...candidates].sort((a, b) => b.classicProb - a.classicProb).slice(0, 30).map(p => p.key),
+  ]);
+  const top30 = candidates.filter(p => top30Keys.has(p.key));
 
   setStage('Checking recent power...');
   const pitcherRecent = new Map();
@@ -2004,10 +2146,12 @@ async function main() {
     Object.assign(pick, score(
       pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, gameEnvFactor, pick.side === 'away'
     ));
+    const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos);
+    pick.classicProb = classic.prob;
+    pick.classicPHr = classic.pHr;
   }));
 
-  top30.sort((a, b) => b.prob - a.prob);
-  const topPicks = limitSameGameAndTeam(top30, 2);
+  const topPicks = mergedModelPicks(top30);
 
   if (!topPicks.length) {
     show(renderToolbar() + `<div class="info-box"><strong>No HR Watchlist Yet</strong>Try again once lineups and player stats are available.</div>` + renderHrBacktestPanel());

@@ -145,7 +145,13 @@ def analyze(label, rows, chance_col, factors):
 
 
 def rows_matching(all_rows, label, prefer=None):
-    names = [name for name in all_rows if label.lower() in name.lower()]
+    label_lower = label.lower()
+    if label_lower.startswith("hit"):
+        names = [name for name in all_rows if name.strip().lower().startswith("hit")]
+    elif label_lower.startswith("hr"):
+        names = [name for name in all_rows if name.strip().lower().startswith("hr")]
+    else:
+        names = [name for name in all_rows if label_lower in name.lower()]
     if prefer:
         preferred = [name for name in names if prefer.lower() in name.lower()]
         if preferred:
