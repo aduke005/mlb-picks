@@ -1450,6 +1450,11 @@ function mergedModelPicks(picks) {
 function pickPayload(pick, idx) {
   return {
     rank: idx + 1,
+    currentRank: Number.isFinite(pick.currentRank) ? pick.currentRank : null,
+    classicRank: Number.isFinite(pick.classicRank) ? pick.classicRank : null,
+    classicProb: Number.isFinite(pick.classicProb) ? pick.classicProb : null,
+    inCurrentTop: typeof pick.inCurrentTop === 'boolean' ? pick.inCurrentTop : null,
+    inClassicTop: typeof pick.inClassicTop === 'boolean' ? pick.inClassicTop : null,
     gamePk: pick.gamePk,
     side: pick.side,
     batterId: pick.batterId,
@@ -1480,6 +1485,7 @@ function currentPickPayload() {
   return {
     date: currentPickDate,
     savedAt: new Date().toISOString(),
+    modelMetadataVersion: 1,
     picks: currentTopPicks.map(pickPayload),
   };
 }
@@ -1555,6 +1561,13 @@ const ANALYSIS_COLUMNS = [
   'Pitcher',
   'Pitcher Hand',
   'Venue',
+  'Current Rank',
+  'Current Chance',
+  'Classic Rank',
+  'Classic Chance',
+  'In Current Top',
+  'In Classic Top',
+  'Selected By',
 ];
 
 function pctText(value) {
@@ -1573,8 +1586,20 @@ function decText(value, places = 3) {
   return value == null || value === '' || isNaN(value) ? '' : Number(value).toFixed(places);
 }
 
+function savedModelSelection(pick) {
+  if (pick.inCurrentTop === true && pick.inClassicTop === true) return 'both';
+  if (pick.inCurrentTop === true) return 'current';
+  if (pick.inClassicTop === true) return 'classic';
+  return '';
+}
+
+function savedModelFlag(value) {
+  return typeof value === 'boolean' ? (value ? 1 : 0) : '';
+}
+
 function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '', source = 'pick') {
   const outcome = result === 'Hit' ? 1 : result === 'Miss' ? 0 : '';
+  const isAudit = source === 'audit';
   return [
     source,
     date,
@@ -1600,6 +1625,13 @@ function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '',
     pick.pitcherName,
     pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
     pick.venue,
+    Number.isFinite(pick.currentRank) ? pick.currentRank : (isAudit ? pick.rank : ''),
+    decText(pick.prob, 4),
+    Number.isFinite(pick.classicRank) ? pick.classicRank : '',
+    decText(pick.classicProb, 4),
+    isAudit ? '' : savedModelFlag(pick.inCurrentTop),
+    isAudit ? '' : savedModelFlag(pick.inClassicTop),
+    isAudit ? '' : savedModelSelection(pick),
   ];
 }
 

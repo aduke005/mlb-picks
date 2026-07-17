@@ -1363,6 +1363,13 @@ const HR_ANALYSIS_COLUMNS = [
   'Pitcher',
   'Pitcher Hand',
   'Venue',
+  'Current Rank',
+  'Current Chance',
+  'Classic Rank',
+  'Classic Chance',
+  'In Current Top',
+  'In Classic Top',
+  'Selected By',
 ];
 
 function tsvCell(value) {
@@ -1427,6 +1434,11 @@ function hasSavedHrPicksForDate(date) {
 function hrPickPayload(pick, idx) {
   return {
     rank: idx + 1,
+    currentRank: Number.isFinite(pick.currentRank) ? pick.currentRank : null,
+    classicRank: Number.isFinite(pick.classicRank) ? pick.classicRank : null,
+    classicProb: Number.isFinite(pick.classicProb) ? pick.classicProb : null,
+    inCurrentTop: typeof pick.inCurrentTop === 'boolean' ? pick.inCurrentTop : null,
+    inClassicTop: typeof pick.inClassicTop === 'boolean' ? pick.inClassicTop : null,
     gamePk: pick.gamePk,
     side: pick.side,
     batterId: pick.batterId,
@@ -1452,6 +1464,15 @@ function hrPickPayload(pick, idx) {
   };
 }
 
+function currentHrPickPayload() {
+  return {
+    date: currentHrDate,
+    savedAt: new Date().toISOString(),
+    modelMetadataVersion: 1,
+    picks: currentHrPicks.map(hrPickPayload),
+  };
+}
+
 function saveCurrentHrPicks() {
   const out = document.getElementById('hr-toolbar-output');
   if (!currentHrDate || !currentHrPicks.length) {
@@ -1465,11 +1486,7 @@ function saveCurrentHrPicks() {
     return;
   }
 
-  const payload = {
-    date: currentHrDate,
-    savedAt: new Date().toISOString(),
-    picks: currentHrPicks.map(hrPickPayload),
-  };
+  const payload = currentHrPickPayload();
   storeHrPickPayload(payload);
   currentHrPicks = payload.picks;
   lastCheckedHrRows = null;
@@ -1484,11 +1501,7 @@ function replaceCurrentHrPicks() {
     if (out) out.textContent = 'No HR picks are loaded yet.';
     return;
   }
-  const payload = {
-    date: currentHrDate,
-    savedAt: new Date().toISOString(),
-    picks: currentHrPicks.map(hrPickPayload),
-  };
+  const payload = currentHrPickPayload();
   storeHrPickPayload(payload);
   currentHrPicks = payload.picks;
   lastCheckedHrRows = null;
@@ -1500,11 +1513,7 @@ function replaceCurrentHrPicks() {
 function autoSaveCurrentHrPicks() {
   if (!currentHrDate || !currentHrPicks.length) return;
   if (hasSavedHrPicksForDate(currentHrDate)) return;
-  const payload = {
-    date: currentHrDate,
-    savedAt: new Date().toISOString(),
-    picks: currentHrPicks.map(hrPickPayload),
-  };
+  const payload = currentHrPickPayload();
   storeHrPickPayload(payload);
   currentHrPicks = payload.picks;
 }
@@ -1513,8 +1522,20 @@ function decText(value, places = 3) {
   return value == null || value === '' || isNaN(value) ? '' : Number(value).toFixed(places);
 }
 
+function savedModelSelection(pick) {
+  if (pick.inCurrentTop === true && pick.inClassicTop === true) return 'both';
+  if (pick.inCurrentTop === true) return 'current';
+  if (pick.inClassicTop === true) return 'classic';
+  return '';
+}
+
+function savedModelFlag(value) {
+  return typeof value === 'boolean' ? (value ? 1 : 0) : '';
+}
+
 function hrAnalysisRow(date, pick, result = '', hr = '', source = 'pick') {
   const outcome = result === 'HR' ? 1 : result === 'No HR' ? 0 : '';
+  const isAudit = source === 'audit';
   return [
     source,
     date,
@@ -1539,6 +1560,13 @@ function hrAnalysisRow(date, pick, result = '', hr = '', source = 'pick') {
     pick.pitcherName,
     pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
     pick.venue,
+    Number.isFinite(pick.currentRank) ? pick.currentRank : (isAudit ? pick.rank : ''),
+    decText(pick.prob, 4),
+    Number.isFinite(pick.classicRank) ? pick.classicRank : '',
+    decText(pick.classicProb, 4),
+    isAudit ? '' : savedModelFlag(pick.inCurrentTop),
+    isAudit ? '' : savedModelFlag(pick.inClassicTop),
+    isAudit ? '' : savedModelSelection(pick),
   ];
 }
 
