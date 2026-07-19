@@ -471,7 +471,7 @@ h1 {
 
 .pick-result-row {
   display: grid;
-  grid-template-columns: 32px 1fr 52px;
+  grid-template-columns: 58px 1fr 52px;
   gap: 8px;
   padding: 5px 0;
   border-top: 1px solid var(--border);
@@ -584,11 +584,6 @@ footer {
 <script>
 'use strict';
 
-// ─── OPTIONAL: paste a free OpenWeatherMap key for wind data ─────────────────
-// Get one free at https://openweathermap.org/api (Current Weather endpoint)
-const WEATHER_KEY = null;
-// ─────────────────────────────────────────────────────────────────────────────
-
 const API    = 'https://statsapi.mlb.com/api/v1';
 const SEASON = new Date().getFullYear();
 const PICK_STORE_KEY = 'mlb-hit-picks-saved-v1';
@@ -664,41 +659,6 @@ const PLATOON = {
   RvR: 1.00, RvL: 1.00,
   LvL: 1.00, LvR: 1.00,
   SvR: 1.00, SvL: 1.00,  // audit has not shown a reliable hit-rate edge here
-};
-
-// Stadium location + open-air flag + compass bearing from home plate → CF
-// (used for wind direction calculation; cf=0 means dome/irrelevant)
-const STADIUM = {
-  115: { lat: 39.756, lon: -104.994, open: true,  cf: 22  }, // COL  Coors
-  113: { lat: 39.097, lon:  -84.507, open: true,  cf:  5  }, // CIN  GABP
-  140: { lat: 32.748, lon:  -97.083, open: true,  cf: 120 }, // TEX  Globe Life
-  110: { lat: 39.284, lon:  -76.622, open: true,  cf:  56 }, // BAL  Camden Yards
-  111: { lat: 42.347, lon:  -71.097, open: true,  cf:  93 }, // BOS  Fenway
-  143: { lat: 39.906, lon:  -75.166, open: true,  cf:  43 }, // PHI  Citizens Bank
-  147: { lat: 40.829, lon:  -73.926, open: true,  cf:  39 }, // NYY  Yankee Stadium
-  158: { lat: 43.029, lon:  -87.971, open: false, cf:   0 }, // MIL  retractable
-  118: { lat: 39.052, lon:  -94.480, open: true,  cf:  49 }, // KC   Kauffman
-  112: { lat: 41.948, lon:  -87.655, open: true,  cf:  35 }, // CHC  Wrigley
-  144: { lat: 33.890, lon:  -84.468, open: true,  cf:  11 }, // ATL  Truist
-  117: { lat: 29.757, lon:  -95.355, open: false, cf:   0 }, // HOU  retractable
-  116: { lat: 42.339, lon:  -83.048, open: true,  cf:  33 }, // DET  Comerica
-  108: { lat: 33.800, lon: -117.883, open: true,  cf: 320 }, // LAA  Angel Stadium
-  142: { lat: 44.982, lon:  -93.278, open: true,  cf: 354 }, // MIN  Target Field
-  114: { lat: 41.496, lon:  -81.685, open: true,  cf:  26 }, // CLE  Progressive
-  138: { lat: 38.623, lon:  -90.193, open: true,  cf:  15 }, // STL  Busch
-  121: { lat: 40.757, lon:  -73.846, open: true,  cf: 354 }, // NYM  Citi Field
-  119: { lat: 34.074, lon: -118.240, open: true,  cf: 346 }, // LAD  Dodger Stadium
-  109: { lat: 33.445, lon: -112.067, open: false, cf:   0 }, // ARI  retractable (usually closed)
-  141: { lat: 43.641, lon:  -79.389, open: false, cf:   0 }, // TOR  dome
-  139: { lat: 27.768, lon:  -82.653, open: false, cf:   0 }, // TB   dome
-  120: { lat: 38.873, lon:  -77.007, open: true,  cf:   5 }, // WSH  Nationals Park
-  146: { lat: 25.778, lon:  -80.220, open: false, cf:   0 }, // MIA  retractable
-  145: { lat: 41.830, lon:  -87.634, open: true,  cf:   8 }, // CHW  Guaranteed Rate
-  136: { lat: 47.591, lon: -122.332, open: false, cf:   0 }, // SEA  retractable
-  134: { lat: 40.447, lon:  -80.006, open: true,  cf: 357 }, // PIT  PNC Park
-  133: { lat: 38.583, lon: -121.502, open: true,  cf:  32 }, // OAK  Sutter Health
-  137: { lat: 37.778, lon: -122.389, open: true,  cf: 315 }, // SF   Oracle Park
-  135: { lat: 32.707, lon: -117.157, open: true,  cf: 328 }, // SD   Petco Park
 };
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
@@ -908,35 +868,9 @@ async function getBatterRecent(id, startDate, endDate) {
   } catch { return null; }
 }
 
-// Wind at venue (requires WEATHER_KEY)
-async function getWind(homeTeamId) {
-  if (!WEATHER_KEY) return null;
-  const st = STADIUM[homeTeamId];
-  if (!st?.open) return null;
-  try {
-    const d = await fetchJSON(
-      `https://api.openweathermap.org/data/2.5/weather` +
-      `?lat=${st.lat}&lon=${st.lon}&appid=${WEATHER_KEY}&units=imperial`
-    );
-    return { speed: d.wind?.speed || 0, deg: d.wind?.deg ?? null, cf: st.cf };
-  } catch { return null; }
-}
-
-// Wind→hit multiplier: alignment between wind direction and CF bearing
-// OpenWeatherMap deg = direction wind comes FROM; we want where it's going.
-function windFactor(wind) {
-  if (!wind || wind.speed < 8 || wind.deg == null) return 1.0;
-  const toward = (wind.deg + 180) % 360;
-  let diff = Math.abs(toward - wind.cf);
-  if (diff > 180) diff = 360 - diff;
-  const alignment = Math.cos((diff * Math.PI) / 180); // 1=blowing out, -1=blowing in
-  const effect = alignment * clamp(wind.speed / 25, 0, 1) * 0.06;
-  return 1 + effect; // up to ±6%
-}
-
 // ─── Scoring ──────────────────────────────────────────────────────────────────
 //
-// P(hit per PA) = batterBase × pitcherWeakness × platoon × park × gameEnv × wind
+// P(hit per PA) = batterBase × pitcherWeakness × platoon × park × gameEnv
 // P(≥1 hit)    = 1 − (1 − pHit)^expectedPAs
 //
 // batterBase = season_BA × opsAdj × recentAdj × contactAdj
@@ -989,7 +923,7 @@ function hitGameEnvironmentFactors(candidates) {
   return factors;
 }
 
-function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind, gameEnvFactor = 1.0, isAway = false) {
+function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor = 1.0, isAway = false) {
   const { hand: pitcherHand, obaa, era, whip, k9, recentERA } = pitcher;
 
   const platoonKey  = `${batterHand}v${pitcherHand}`;
@@ -1061,14 +995,13 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, wind, gameEnv
   );
 
   const parkAdj = 1.0;
-  const wf    = windFactor(wind);
-  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkAdj * wf * gameEnvFactor, 0.04, MODEL.maxPerPaHit);
+  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkAdj * gameEnvFactor, 0.04, MODEL.maxPerPaHit);
   const ePAs  = expectedPAs(lineupPos);
   const rawProb = 1 - Math.pow(1 - pHit, ePAs);
   const prob = calibrateProbability(rawProb, ePAs);
 
   return {
-    prob, rawProb, pHit, seasonHPerPa, platoon, pitcherWeakness, parkFactor, parkAdj, wf,
+    prob, rawProb, pHit, seasonHPerPa, platoon, pitcherWeakness, parkFactor, parkAdj,
     opsAdj, recentAdj, contactAdj, awayAdj, ttoAdj: ttoFactor(lineupPos), gameEnvFactor, ePAs,
     batterHand, pitcherHand, batterSplit, pitcherSplit, awaySplit, isAway,
   };
@@ -1080,7 +1013,7 @@ const CLASSIC_PLATOON = {
   SvR: 1.04, SvL: 1.04,
 };
 
-function classicScore(batter, pitcher, parkFactor, batterHand, lineupPos, wind) {
+function classicScore(batter, pitcher, parkFactor, batterHand, lineupPos) {
   const { hand: pitcherHand, obaa, era, whip, k9, recentERA } = pitcher;
   const platoon = CLASSIC_PLATOON[`${batterHand}v${pitcherHand}`] ?? 1.0;
   const opsAdj = clamp(
@@ -1103,11 +1036,10 @@ function classicScore(batter, pitcher, parkFactor, batterHand, lineupPos, wind) 
     ((recentERA ?? era ?? LEAGUE.era) / LEAGUE.era) * 0.15,
     0.40, 2.20
   );
-  const wf = windFactor(wind);
-  const pHit = clamp(batterBase * pitcherWeakness * platoon * parkFactor * wf, 0.05, 0.65);
+  const pHit = clamp(batterBase * pitcherWeakness * platoon * parkFactor, 0.05, 0.65);
   const ePAs = expectedPAs(lineupPos);
   const prob = 1 - Math.pow(1 - pHit, ePAs);
-  return { prob, pHit, opsAdj, recentAdj, contactAdj, platoon, pitcherWeakness, wf };
+  return { prob, pHit, opsAdj, recentAdj, contactAdj, platoon, pitcherWeakness };
 }
 
 // ─── Rendering ────────────────────────────────────────────────────────────────
@@ -1140,14 +1072,6 @@ function platoonLabel(b, p) {
   const bat = b === 'S' ? 'Switch' : b === 'L' ? 'Left' : 'Right';
   const pit = p === 'L' ? 'left-handed pitcher' : 'right-handed pitcher';
   return `${bat}-handed hitter vs ${pit}`;
-}
-
-function windDesc(wf, wind) {
-  if (!wind || wind.speed < 8 || wind.deg == null) return null;
-  const dir  = ['N','NE','E','SE','S','SW','W','NW'][Math.round(wind.deg / 45) % 8];
-  const mph  = Math.round(wind.speed);
-  const effect = wf > 1.02 ? 'blowing out' : wf < 0.98 ? 'blowing in' : 'crosswind';
-  return `${mph} mph ${dir} — ${effect}`;
 }
 
 function joinReasons(reasons) {
@@ -1193,10 +1117,6 @@ function renderCard(pick, rank) {
   const recentText = hasRecent
     ? `${fmtAvg(pick.batter.recentAvg)} last ${MODEL.recentDays} days (${pick.batter.recentAb} at-bats) ${farrow(pick.recentAdj)}`
     : 'no recent data';
-
-  // Wind
-  const wDesc = windDesc(pick.wf, pick.wind);
-  const wCls  = pick.wf > 1.02 ? 'good' : pick.wf < 0.98 ? 'bad' : 'neutral';
 
   return `
 <div class="card rank-${rank}">
@@ -1297,11 +1217,6 @@ function renderCard(pick, rank) {
       <span class="factor-name">Starter fatigue chance</span>
       <span class="factor-val ${fcls(pick.ttoAdj)}">${farrow(pick.ttoAdj)}</span>
     </div>
-    ${wDesc ? `
-    <div class="factor">
-      <span class="factor-name">Wind</span>
-      <span class="factor-val ${wCls}">${wDesc}</span>
-    </div>` : ''}
   </div>
 </div>`;
 }
@@ -1309,12 +1224,15 @@ function renderCard(pick, rank) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 function renderSummary(picks) {
-  return `
-<div class="summary-list">
-  <div class="summary-title">Quick Picks</div>
-  ${picks.map((pick, i) => `
-    ${i === 0 ? '<div class="summary-tier">Strongest hit picks</div>' : ''}
-    ${i === 5 ? '<div class="summary-tier">Leans / odds-dependent</div>' : ''}
+  let previousTier = null;
+  const rows = picks.map((pick, i) => {
+    const tier = isConsensusPick(pick) ? 'consensus' : 'single';
+    const tierHeading = tier !== previousTier
+      ? `<div class="summary-tier">${tier === 'consensus' ? 'Selected by both models' : 'Single-model additions'}</div>`
+      : '';
+    previousTier = tier;
+    return `
+    ${tierHeading}
     <div class="summary-row">
       <div class="summary-rank">#${i + 1}</div>
       <div class="summary-name">${pick.batterName}
@@ -1325,7 +1243,13 @@ function renderSummary(picks) {
       </div>
       <div class="summary-time">${pick.gameTime || ''}</div>
       <div class="summary-pct">${Math.round(pick.prob * 100)}%</div>
-    </div>`).join('')}
+    </div>`;
+  }).join('');
+
+  return `
+<div class="summary-list">
+  <div class="summary-title">Quick Picks</div>
+  ${rows}
 </div>`;
 }
 
@@ -1337,8 +1261,56 @@ function getPickHistory() {
   }
 }
 
+function pickIdentity(pick) {
+  if (pick?.gamePk != null && pick?.batterId != null) {
+    return `${pick.gamePk}:${pick.batterId}`;
+  }
+  return [
+    pick?.gamePk || 'unknown-game',
+    pick?.side || '',
+    pick?.batterTeam || '',
+    pick?.batterName || 'unknown-player',
+  ].join(':').toLowerCase();
+}
+
+function hitPredictionId(date, pick) {
+  return `hit:${date || 'unknown-date'}:${pickIdentity(pick)}`;
+}
+
+function pickCaptureRun(pick) {
+  const run = Number.parseInt(pick?.captureRun, 10);
+  return Number.isFinite(run) && run > 0 ? run : 1;
+}
+
+function normalizeSavedPickPayload(payload) {
+  if (!payload?.date) return payload || null;
+  const fallbackCapturedAt = payload.firstSavedAt || payload.savedAt || '';
+  const picks = (payload.picks || []).map(pick => ({
+    ...pick,
+    capturedAt: pick.capturedAt || fallbackCapturedAt,
+    captureRun: pickCaptureRun(pick),
+    predictionId: pick.predictionId || hitPredictionId(payload.date, pick),
+  }));
+  const captureCount = Math.max(
+    Number.parseInt(payload.captureCount, 10) || 0,
+    picks.length ? 1 : 0,
+    ...picks.map(pickCaptureRun)
+  );
+  return {
+    ...payload,
+    firstSavedAt: fallbackCapturedAt,
+    modelMetadataVersion: Math.max(payload.modelMetadataVersion || 1, 2),
+    captureCount,
+    picks,
+  };
+}
+
+function savedCaptureCount(payload) {
+  return normalizeSavedPickPayload(payload)?.captureCount || 0;
+}
+
 function getSavedPicksForDate(date) {
-  return getPickHistory()[date] || null;
+  return normalizeSavedPickPayload(getPickHistory()[date] || null);
 }
 
 function getLatestSavedPicks() {
@@ -1354,7 +1326,9 @@ function getSavedPicksForResults() {
 }
 
 function pickSavedPayload(history, options = {}) {
-  const values = Object.values(history || {}).filter(p => p?.date && p?.picks?.length);
+  const values = Object.values(history || {})
+    .map(normalizeSavedPickPayload)
+    .filter(p => p?.date && p?.picks?.length);
   if (!values.length) return null;
   values.sort((a, b) => b.date.localeCompare(a.date));
   if (options.pastOnly) {
@@ -1365,10 +1339,12 @@ function pickSavedPayload(history, options = {}) {
 }
 
 function storePickPayload(payload) {
+  const normalized = normalizeSavedPickPayload(payload);
   const history = getPickHistory();
-  history[payload.date] = payload;
+  history[normalized.date] = normalized;
   localStorage.setItem(PICK_HISTORY_KEY, JSON.stringify(history));
-  localStorage.setItem(PICK_STORE_KEY, JSON.stringify(payload));
+  localStorage.setItem(PICK_STORE_KEY, JSON.stringify(normalized));
+  return normalized;
 }
 
 function savedStateStamp(date = currentPickDate) {
@@ -1382,15 +1358,16 @@ function hasSavedPicksForDate(date) {
 
 function renderPickTracker() {
   const saved = (currentPickDate && getSavedPicksForDate(currentPickDate)) || getSavedPicksForResults();
+  const captureCount = savedCaptureCount(saved);
   const savedText = saved
-    ? `Saved ${saved.picks.length} picks for ${formatDate(saved.date)}. This browser remembers the latest saved day.`
-    : 'Save today\'s picks when you want this displayed list to become the locked list for tracking.';
+    ? `Saved ${saved.picks.length} picks across ${captureCount} save round${captureCount === 1 ? '' : 's'} for ${formatDate(saved.date)}.`
+    : 'Save new picks when you want this displayed list to become the locked list for tracking.';
 
   return `
 <div class="tracker">
   <div class="tracker-title">Track These Picks</div>
   <div class="tracker-actions">
-    <button onclick="saveCurrentPicks()">Save today's picks</button>
+    <button onclick="saveCurrentPicks()">Save new picks</button>
     <button onclick="replaceCurrentPicks()">Replace saved picks</button>
     <button onclick="checkTodaysSavedPicks()">Check today's picks</button>
     <button onclick="checkPastSavedPicks()">Check past picks</button>
@@ -1425,6 +1402,18 @@ function rankPicks(picks, field, rankField) {
     .forEach((pick, i) => { pick[rankField] = i + 1; });
 }
 
+function isConsensusPick(pick) {
+  return pick.inCurrentTop === true && pick.inClassicTop === true;
+}
+
+function compareHitDisplayPicks(a, b) {
+  const consensusOrder = Number(isConsensusPick(b)) - Number(isConsensusPick(a));
+  if (consensusOrder) return consensusOrder;
+  return (b.prob - a.prob)
+    || ((a.currentRank || 999) - (b.currentRank || 999))
+    || ((a.classicRank || 999) - (b.classicRank || 999));
+}
+
 function mergedModelPicks(picks) {
   rankPicks(picks, 'prob', 'currentRank');
   rankPicks(picks, 'classicProb', 'classicRank');
@@ -1440,14 +1429,10 @@ function mergedModelPicks(picks) {
     else merged.set(pick.key, { ...pick, inCurrentTop: false, inClassicTop: true });
   }
 
-  return [...merged.values()].sort((a, b) => {
-    const aBest = Math.min(a.currentRank || 999, a.classicRank || 999);
-    const bBest = Math.min(b.currentRank || 999, b.classicRank || 999);
-    return aBest - bBest || b.prob - a.prob;
-  });
+  return [...merged.values()].sort(compareHitDisplayPicks);
 }
 
-function pickPayload(pick, idx) {
+function pickPayload(pick, idx, capturedAt, captureRun, date = currentPickDate) {
   return {
     rank: idx + 1,
     currentRank: Number.isFinite(pick.currentRank) ? pick.currentRank : null,
@@ -1478,15 +1463,58 @@ function pickPayload(pick, idx) {
     opsAdj: pick.opsAdj,
     gameTime: pick.gameTime,
     venue: pick.venue,
+    capturedAt,
+    captureRun,
+    predictionId: hitPredictionId(date, pick),
   };
 }
 
-function currentPickPayload() {
+function currentPickPayload(capturedAt = new Date().toISOString(), captureRun = 1) {
   return {
     date: currentPickDate,
-    savedAt: new Date().toISOString(),
-    modelMetadataVersion: 1,
-    picks: currentTopPicks.map(pickPayload),
+    savedAt: capturedAt,
+    firstSavedAt: capturedAt,
+    modelMetadataVersion: 2,
+    captureCount: captureRun,
+    picks: currentTopPicks.map((pick, idx) =>
+      pickPayload(pick, idx, capturedAt, captureRun, currentPickDate)
+    ),
+  };
+}
+
+function appendCurrentPickPayload(existing) {
+  const saved = normalizeSavedPickPayload(existing);
+  const capturedAt = new Date().toISOString();
+  const captureRun = savedCaptureCount(saved) + 1;
+  const incoming = currentTopPicks.map((pick, idx) =>
+    pickPayload(pick, idx, capturedAt, captureRun, currentPickDate)
+  );
+  const seen = new Set(saved.picks.map(pickIdentity));
+  const added = [];
+
+  for (const pick of incoming) {
+    const identity = pickIdentity(pick);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    added.push(pick);
+  }
+
+  if (!added.length) {
+    return { payload: saved, addedCount: 0, duplicateCount: incoming.length, captureRun: null };
+  }
+
+  return {
+    payload: {
+      ...saved,
+      savedAt: capturedAt,
+      firstSavedAt: saved.firstSavedAt || saved.savedAt || capturedAt,
+      modelMetadataVersion: 2,
+      captureCount: captureRun,
+      picks: [...saved.picks, ...added],
+    },
+    addedCount: added.length,
+    duplicateCount: incoming.length - added.length,
+    captureRun,
   };
 }
 
@@ -1499,16 +1527,26 @@ function saveCurrentPicks() {
 
   const existing = getSavedPicksForDate(currentPickDate);
   if (existing?.picks?.length) {
-    if (out) out.textContent = `Already saved ${existing.picks.length} picks for ${formatDate(existing.date)}. Use "Replace saved picks" only if you want to overwrite that locked list.`;
+    const merged = appendCurrentPickPayload(existing);
+    if (!merged.addedCount) {
+      if (out) out.textContent = `No new batter/game picks to add. The ${existing.picks.length} saved picks remain unchanged.`;
+      return;
+    }
+    const payload = storePickPayload(merged.payload);
+    lastCheckedPickRows = null;
+    lastCheckedPickDate = null;
+    if (out) {
+      out.textContent = `Added ${merged.addedCount} new picks in save round ${merged.captureRun}. ` +
+        `Kept ${payload.picks.length - merged.addedCount} earlier picks unchanged.`;
+    }
+    savePageCache();
     return;
   }
 
-  const payload = currentPickPayload();
-  storePickPayload(payload);
-  currentTopPicks = payload.picks;
+  const payload = storePickPayload(currentPickPayload());
   lastCheckedPickRows = null;
   lastCheckedPickDate = null;
-  if (out) out.textContent = `Saved ${payload.picks.length} picks for ${formatDate(payload.date)}. Come back after the games finish and tap "Check saved picks."`;
+  if (out) out.textContent = `Saved ${payload.picks.length} picks in save round 1 for ${formatDate(payload.date)}.`;
   savePageCache();
 }
 
@@ -1519,21 +1557,17 @@ function replaceCurrentPicks() {
     return;
   }
 
-  const payload = currentPickPayload();
-  storePickPayload(payload);
-  currentTopPicks = payload.picks;
+  const payload = storePickPayload(currentPickPayload());
   lastCheckedPickRows = null;
   lastCheckedPickDate = null;
-  if (out) out.textContent = `Replaced saved picks for ${formatDate(payload.date)} with the ${payload.picks.length} currently displayed picks.`;
+  if (out) out.textContent = `Replaced saved picks for ${formatDate(payload.date)} with ${payload.picks.length} picks in a new save round 1.`;
   savePageCache();
 }
 
 function autoSaveCurrentPicks() {
   if (!currentPickDate || !currentTopPicks.length) return;
   if (hasSavedPicksForDate(currentPickDate)) return;
-  const payload = currentPickPayload();
-  storePickPayload(payload);
-  currentTopPicks = payload.picks;
+  storePickPayload(currentPickPayload());
 }
 
 const ANALYSIS_COLUMNS = [
@@ -1568,6 +1602,12 @@ const ANALYSIS_COLUMNS = [
   'In Current Top',
   'In Classic Top',
   'Selected By',
+  'Captured At',
+  'Capture Run',
+  'Game Time',
+  'Game PK',
+  'Batter ID',
+  'Prediction ID',
 ];
 
 function pctText(value) {
@@ -1632,6 +1672,12 @@ function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '',
     isAudit ? '' : savedModelFlag(pick.inCurrentTop),
     isAudit ? '' : savedModelFlag(pick.inClassicTop),
     isAudit ? '' : savedModelSelection(pick),
+    isAudit ? '' : pick.capturedAt,
+    isAudit ? '' : pickCaptureRun(pick),
+    pick.gameTime || '',
+    pick.gamePk || '',
+    pick.batterId || '',
+    isAudit ? '' : (pick.predictionId || hitPredictionId(date, pick)),
   ];
 }
 
@@ -1693,7 +1739,7 @@ function renderSavedPickResults(saved, rows) {
     : 0;
   const list = rows.map(r => `
     <div class="pick-result-row">
-      <span>#${r.rank}</span>
+      <span>R${r.captureRun} #${r.rank}</span>
       <span>${r.name}</span>
       <span class="${r.status === 'pending' ? 'neutral' : r.hit ? 'good' : 'bad'}">${r.status === 'pending' ? 'Pending' : r.hit ? `Hit ${r.hits}/${r.atBats}` : `Miss ${r.hits}/${r.atBats}`}</span>
     </div>`).join('');
@@ -1704,7 +1750,7 @@ function renderSavedPickResults(saved, rows) {
     <div style="margin-top:8px">${list}</div>`;
 }
 
-async function checkSavedPicks(saved = getSavedPicksForResults(), missingText = 'No saved picks yet. Tap "Save today\'s picks" first.') {
+async function checkSavedPicks(saved = getSavedPicksForResults(), missingText = 'No saved picks yet. Tap "Save new picks" first.') {
   const out = document.getElementById('tracker-output');
   if (!saved?.picks?.length) {
     if (out) out.textContent = missingText;
@@ -1726,6 +1772,7 @@ async function checkSavedPicks(saved = getSavedPicksForResults(), missingText = 
       const batting = player?.stats?.batting;
       return {
         rank: pick.rank,
+        captureRun: pickCaptureRun(pick),
         name: pick.batterName,
         prob: pick.prob,
         status: batting ? 'final' : 'pending',
@@ -1747,7 +1794,7 @@ async function checkSavedPicks(saved = getSavedPicksForResults(), missingText = 
 async function checkTodaysSavedPicks() {
   await checkSavedPicks(
     getSavedPicksForDate(todayStr()),
-    'No saved picks for today yet. Tap "Save today\'s picks" first.'
+    'No saved picks for today yet. Tap "Save new picks" first.'
   );
 }
 
@@ -2019,7 +2066,7 @@ async function runBacktest() {
       preScores.push({
         gamePk: e.gamePk,
         parkFactor: e.parkFactor,
-        ...score(batter, pitcher, e.parkFactor, hands[e.id] || 'R', e.lineupPos, null, 1.0, e.side === 'away'),
+        ...score(batter, pitcher, e.parkFactor, hands[e.id] || 'R', e.lineupPos, 1.0, e.side === 'away'),
       });
     }
     const gameEnvFactors = hitGameEnvironmentFactors(preScores);
@@ -2040,7 +2087,7 @@ async function runBacktest() {
       const pitcher = pitchers[e.pitcher?.id];
       if (!batter || batter.pa < MODEL.minBatterPa || !pitcher) continue;
       const gameEnvFactor = gameEnvFactors.get(e.gamePk) ?? 1.0;
-      const s = score(batter, pitcher, e.parkFactor, hands[e.id] || 'R', e.lineupPos, null, gameEnvFactor, e.side === 'away');
+      const s = score(batter, pitcher, e.parkFactor, hands[e.id] || 'R', e.lineupPos, gameEnvFactor, e.side === 'away');
       const boxPlayer = Object.values(boxscores.get(e.gamePk)?.teams?.[e.side]?.players || {})
         .find(p => p.person?.id === e.id);
       if (!boxPlayer?.stats?.batting) continue;
@@ -2235,10 +2282,10 @@ async function main() {
     if (!pitcher) continue;
 
     const s = score(
-      bs, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos, null, 1.0, meta.side === 'away'
+      bs, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos, 1.0, meta.side === 'away'
     );
     const classic = classicScore(
-      bs, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos, null
+      bs, pitcher, meta.parkFactor, batterHands[meta.id] || 'R', meta.lineupPos
     );
 
     candidates.push({
@@ -2269,9 +2316,9 @@ async function main() {
   for (const pick of candidates) {
     const gameEnvFactor = gameEnvFactors.get(pick.gamePk) ?? 1.0;
     Object.assign(pick, score(
-      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, null, gameEnvFactor, pick.side === 'away'
+      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, gameEnvFactor, pick.side === 'away'
     ));
-    const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, null);
+    const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos);
     pick.classicProb = classic.prob;
     pick.classicPHit = classic.pHit;
   }
@@ -2315,12 +2362,11 @@ async function main() {
       pick.pitcher.recentERA = recent?.era ?? null;
       pick.pitcher.recentIp = recent?.ip ?? 0;
     }
-    const wind = null; // fetched per-venue below for the final displayed picks
     const gameEnvFactor = gameEnvFactors.get(pick.gamePk) ?? 1.0;
     Object.assign(pick, score(
-      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, wind, gameEnvFactor, pick.side === 'away'
+      pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, gameEnvFactor, pick.side === 'away'
     ));
-    const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, wind);
+    const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos);
     pick.classicProb = classic.prob;
     pick.classicPHit = classic.pHit;
   }
@@ -2334,33 +2380,6 @@ async function main() {
     );
     savePageCache();
     return;
-  }
-
-  // ── Stage 6: wind for the 6 venues (if key set) ───────────────────────────
-  if (WEATHER_KEY) {
-    setStage('Fetching wind data…');
-    const venueIds = [...new Set(topPicks.map(p => p.homeTeamId))];
-    const windMap  = {};
-    await Promise.all(venueIds.map(async id => {
-      windMap[id] = await getWind(id);
-    }));
-    for (const pick of topPicks) {
-      pick.wind = windMap[pick.homeTeamId] ?? null;
-      const gameEnvFactor = gameEnvFactors.get(pick.gamePk) ?? 1.0;
-      Object.assign(pick, score(
-        pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, pick.wind, gameEnvFactor, pick.side === 'away'
-      ));
-      const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, pick.wind);
-      pick.classicProb = classic.prob;
-      pick.classicPHit = classic.pHit;
-    }
-    topPicks.sort((a, b) => {
-      const aBest = Math.min(a.currentRank || 999, a.classicRank || 999);
-      const bBest = Math.min(b.currentRank || 999, b.classicRank || 999);
-      return aBest - bBest || b.prob - a.prob;
-    });
-  } else {
-    topPicks.forEach(p => { p.wind = null; });
   }
 
   currentPickDate = date;
@@ -2428,13 +2447,31 @@ function restorePageCache() {
   }
 }
 
+function captureTimeLabel(value) {
+  if (!value) return '';
+  const captured = new Date(value);
+  if (Number.isNaN(captured.getTime())) return '';
+  return captured.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
 function renderSavedPickSnapshot(saved) {
-  const rows = saved.picks.map(pick => `
+  const normalized = normalizeSavedPickPayload(saved);
+  let previousRun = null;
+  const rows = normalized.picks.map(pick => {
+    const run = pickCaptureRun(pick);
+    const time = captureTimeLabel(pick.capturedAt);
+    const heading = run !== previousRun
+      ? `<div class="summary-tier">Save round ${run}${time ? ` - ${time}` : ''}</div>`
+      : '';
+    previousRun = run;
+    return `
+    ${heading}
     <div class="summary-row">
       <div class="summary-rank">#${pick.rank}</div>
       <div class="summary-name">${pick.batterName}</div>
       <div class="summary-pct">${pctText(pick.prob)}</div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   return `
 <div class="summary-list">
@@ -2443,7 +2480,7 @@ function renderSavedPickSnapshot(saved) {
 </div>
 ${renderPickTracker()}
 <div class="info-box">
-  <strong>Showing saved picks for ${formatDate(saved.date)}</strong>
+  <strong>Showing saved picks for ${formatDate(normalized.date)}</strong>
   These are the locked picks used for result checks and completed-row copies.
   Use the refresh button only when you want to run a new model list.
 </div>

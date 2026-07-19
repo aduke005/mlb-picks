@@ -1,5 +1,6 @@
 .agent-dialog/
 scripts/
 audit/*.xlsx
+audit/*.pdf
 __pycache__/
 *.pyc

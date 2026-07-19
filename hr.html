@@ -249,7 +249,7 @@ h1 {
 
 .pick-result-row {
   display: grid;
-  grid-template-columns: 32px 1fr 58px;
+  grid-template-columns: 58px 1fr 58px;
   gap: 8px;
   padding: 5px 0;
   border-top: 1px solid var(--border);
@@ -1071,13 +1071,14 @@ function renderSummary(picks) {
 
 function renderToolbar() {
   const saved = (currentHrDate && getSavedHrPicksForDate(currentHrDate)) || getSavedHrPicksForResults();
+  const captureCount = savedHrCaptureCount(saved);
   const savedText = saved
-    ? `Saved ${saved.picks.length} HR picks for ${formatDate(saved.date)}.`
-    : 'Save this HR list when you want it to become the locked list for tracking.';
+    ? `Saved ${saved.picks.length} HR picks across ${captureCount} save round${captureCount === 1 ? '' : 's'} for ${formatDate(saved.date)}.`
+    : 'Save new HR picks when you want this displayed list to become the locked list for tracking.';
   return `
 <div class="toolbar">
   <div class="tracker-actions">
-    <button onclick="saveCurrentHrPicks()">Save HR picks</button>
+    <button onclick="saveCurrentHrPicks()">Save new HR picks</button>
     <button onclick="replaceCurrentHrPicks()">Replace saved HR picks</button>
     <button onclick="checkTodaysSavedHrPicks()">Check today's HR picks</button>
     <button onclick="checkPastSavedHrPicks()">Check past HR picks</button>
@@ -1285,13 +1286,31 @@ function restorePageCache() {
   }
 }
 
+function hrCaptureTimeLabel(value) {
+  if (!value) return '';
+  const captured = new Date(value);
+  if (Number.isNaN(captured.getTime())) return '';
+  return captured.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
 function renderSavedHrSnapshot(saved) {
-  const rows = saved.picks.map(pick => `
+  const normalized = normalizeSavedHrPayload(saved);
+  let previousRun = null;
+  const rows = normalized.picks.map(pick => {
+    const run = hrPickCaptureRun(pick);
+    const time = hrCaptureTimeLabel(pick.capturedAt);
+    const heading = run !== previousRun
+      ? `<div class="summary-tier">Save round ${run}${time ? ` - ${time}` : ''}</div>`
+      : '';
+    previousRun = run;
+    return `
+    ${heading}
     <div class="summary-row">
       <div class="summary-rank">#${pick.rank}</div>
       <div class="summary-name">${pick.batterName}</div>
       <div class="summary-pct">${fmtPct(pick.prob)}</div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 
   return `
 <div class="summary-list">
@@ -1301,7 +1320,7 @@ function renderSavedHrSnapshot(saved) {
 ${renderToolbar()}
 ${renderHrBacktestPanel()}
 <div class="info-box">
-  <strong>Showing saved HR picks for ${formatDate(saved.date)}</strong>
+  <strong>Showing saved HR picks for ${formatDate(normalized.date)}</strong>
   These are the locked picks used for result checks and completed-row copies.
   Use the refresh button only when you want to run a new model list.
 </div>`;
@@ -1370,6 +1389,12 @@ const HR_ANALYSIS_COLUMNS = [
   'In Current Top',
   'In Classic Top',
   'Selected By',
+  'Captured At',
+  'Capture Run',
+  'Game Time',
+  'Game PK',
+  'Batter ID',
+  'Prediction ID',
 ];
 
 function tsvCell(value) {
@@ -1388,8 +1413,56 @@ function getHrPickHistory() {
   }
 }
 
+function hrPickIdentity(pick) {
+  if (pick?.gamePk != null && pick?.batterId != null) {
+    return `${pick.gamePk}:${pick.batterId}`;
+  }
+  return [
+    pick?.gamePk || 'unknown-game',
+    pick?.side || '',
+    pick?.batterTeam || '',
+    pick?.batterName || 'unknown-player',
+  ].join(':').toLowerCase();
+}
+
+function hrPredictionId(date, pick) {
+  return `hr:${date || 'unknown-date'}:${hrPickIdentity(pick)}`;
+}
+
+function hrPickCaptureRun(pick) {
+  const run = Number.parseInt(pick?.captureRun, 10);
+  return Number.isFinite(run) && run > 0 ? run : 1;
+}
+
+function normalizeSavedHrPayload(payload) {
+  if (!payload?.date) return payload || null;
+  const fallbackCapturedAt = payload.firstSavedAt || payload.savedAt || '';
+  const picks = (payload.picks || []).map(pick => ({
+    ...pick,
+    capturedAt: pick.capturedAt || fallbackCapturedAt,
+    captureRun: hrPickCaptureRun(pick),
+    predictionId: pick.predictionId || hrPredictionId(payload.date, pick),
+  }));
+  const captureCount = Math.max(
+    Number.parseInt(payload.captureCount, 10) || 0,
+    picks.length ? 1 : 0,
+    ...picks.map(hrPickCaptureRun)
+  );
+  return {
+    ...payload,
+    firstSavedAt: fallbackCapturedAt,
+    modelMetadataVersion: Math.max(payload.modelMetadataVersion || 1, 2),
+    captureCount,
+    picks,
+  };
+}
+
+function savedHrCaptureCount(payload) {
+  return normalizeSavedHrPayload(payload)?.captureCount || 0;
+}
+
 function getSavedHrPicksForDate(date) {
-  return getHrPickHistory()[date] || null;
+  return normalizeSavedHrPayload(getHrPickHistory()[date] || null);
 }
 
 function getLatestSavedHrPicks() {
@@ -1405,7 +1478,9 @@ function getSavedHrPicksForResults() {
 }
 
 function pickSavedPayload(history, options = {}) {
-  const values = Object.values(history || {}).filter(p => p?.date && p?.picks?.length);
+  const values = Object.values(history || {})
+    .map(normalizeSavedHrPayload)
+    .filter(p => p?.date && p?.picks?.length);
   if (!values.length) return null;
   values.sort((a, b) => b.date.localeCompare(a.date));
   if (options.pastOnly) {
@@ -1416,10 +1491,12 @@ function pickSavedPayload(history, options = {}) {
 }
 
 function storeHrPickPayload(payload) {
+  const normalized = normalizeSavedHrPayload(payload);
   const history = getHrPickHistory();
-  history[payload.date] = payload;
+  history[normalized.date] = normalized;
   localStorage.setItem(HR_PICK_HISTORY_KEY, JSON.stringify(history));
-  localStorage.setItem(HR_PICK_STORE_KEY, JSON.stringify(payload));
+  localStorage.setItem(HR_PICK_STORE_KEY, JSON.stringify(normalized));
+  return normalized;
 }
 
 function savedHrStateStamp(date = currentHrDate) {
@@ -1431,7 +1508,7 @@ function hasSavedHrPicksForDate(date) {
   return !!getHrPickHistory()[date];
 }
 
-function hrPickPayload(pick, idx) {
+function hrPickPayload(pick, idx, capturedAt, captureRun, date = currentHrDate) {
   return {
     rank: idx + 1,
     currentRank: Number.isFinite(pick.currentRank) ? pick.currentRank : null,
@@ -1461,15 +1538,59 @@ function hrPickPayload(pick, idx) {
     pitcherHand: pick.pitcherHand,
     lineupPos: pick.lineupPos,
     venue: pick.venue,
+    gameTime: pick.gameTime,
+    capturedAt,
+    captureRun,
+    predictionId: hrPredictionId(date, pick),
   };
 }
 
-function currentHrPickPayload() {
+function currentHrPickPayload(capturedAt = new Date().toISOString(), captureRun = 1) {
   return {
     date: currentHrDate,
-    savedAt: new Date().toISOString(),
-    modelMetadataVersion: 1,
-    picks: currentHrPicks.map(hrPickPayload),
+    savedAt: capturedAt,
+    firstSavedAt: capturedAt,
+    modelMetadataVersion: 2,
+    captureCount: captureRun,
+    picks: currentHrPicks.map((pick, idx) =>
+      hrPickPayload(pick, idx, capturedAt, captureRun, currentHrDate)
+    ),
+  };
+}
+
+function appendCurrentHrPickPayload(existing) {
+  const saved = normalizeSavedHrPayload(existing);
+  const capturedAt = new Date().toISOString();
+  const captureRun = savedHrCaptureCount(saved) + 1;
+  const incoming = currentHrPicks.map((pick, idx) =>
+    hrPickPayload(pick, idx, capturedAt, captureRun, currentHrDate)
+  );
+  const seen = new Set(saved.picks.map(hrPickIdentity));
+  const added = [];
+
+  for (const pick of incoming) {
+    const identity = hrPickIdentity(pick);
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    added.push(pick);
+  }
+
+  if (!added.length) {
+    return { payload: saved, addedCount: 0, duplicateCount: incoming.length, captureRun: null };
+  }
+
+  return {
+    payload: {
+      ...saved,
+      savedAt: capturedAt,
+      firstSavedAt: saved.firstSavedAt || saved.savedAt || capturedAt,
+      modelMetadataVersion: 2,
+      captureCount: captureRun,
+      picks: [...saved.picks, ...added],
+    },
+    addedCount: added.length,
+    duplicateCount: incoming.length - added.length,
+    captureRun,
   };
 }
 
@@ -1482,16 +1603,26 @@ function saveCurrentHrPicks() {
 
   const existing = getSavedHrPicksForDate(currentHrDate);
   if (existing?.picks?.length) {
-    if (out) out.textContent = `Already saved ${existing.picks.length} HR picks for ${formatDate(existing.date)}. Use "Replace saved HR picks" only if you want to overwrite that locked list.`;
+    const merged = appendCurrentHrPickPayload(existing);
+    if (!merged.addedCount) {
+      if (out) out.textContent = `No new batter/game HR picks to add. The ${existing.picks.length} saved picks remain unchanged.`;
+      return;
+    }
+    const payload = storeHrPickPayload(merged.payload);
+    lastCheckedHrRows = null;
+    lastCheckedHrDate = null;
+    if (out) {
+      out.textContent = `Added ${merged.addedCount} new HR picks in save round ${merged.captureRun}. ` +
+        `Kept ${payload.picks.length - merged.addedCount} earlier picks unchanged.`;
+    }
+    savePageCache();
     return;
   }
 
-  const payload = currentHrPickPayload();
-  storeHrPickPayload(payload);
-  currentHrPicks = payload.picks;
+  const payload = storeHrPickPayload(currentHrPickPayload());
   lastCheckedHrRows = null;
   lastCheckedHrDate = null;
-  if (out) out.textContent = `Saved ${payload.picks.length} HR picks for ${formatDate(payload.date)}.`;
+  if (out) out.textContent = `Saved ${payload.picks.length} HR picks in save round 1 for ${formatDate(payload.date)}.`;
   savePageCache();
 }
 
@@ -1501,21 +1632,17 @@ function replaceCurrentHrPicks() {
     if (out) out.textContent = 'No HR picks are loaded yet.';
     return;
   }
-  const payload = currentHrPickPayload();
-  storeHrPickPayload(payload);
-  currentHrPicks = payload.picks;
+  const payload = storeHrPickPayload(currentHrPickPayload());
   lastCheckedHrRows = null;
   lastCheckedHrDate = null;
-  if (out) out.textContent = `Replaced saved HR picks for ${formatDate(payload.date)} with the ${payload.picks.length} currently displayed picks.`;
+  if (out) out.textContent = `Replaced saved HR picks for ${formatDate(payload.date)} with ${payload.picks.length} picks in a new save round 1.`;
   savePageCache();
 }
 
 function autoSaveCurrentHrPicks() {
   if (!currentHrDate || !currentHrPicks.length) return;
   if (hasSavedHrPicksForDate(currentHrDate)) return;
-  const payload = currentHrPickPayload();
-  storeHrPickPayload(payload);
-  currentHrPicks = payload.picks;
+  storeHrPickPayload(currentHrPickPayload());
 }
 
 function decText(value, places = 3) {
@@ -1567,6 +1694,12 @@ function hrAnalysisRow(date, pick, result = '', hr = '', source = 'pick') {
     isAudit ? '' : savedModelFlag(pick.inCurrentTop),
     isAudit ? '' : savedModelFlag(pick.inClassicTop),
     isAudit ? '' : savedModelSelection(pick),
+    isAudit ? '' : pick.capturedAt,
+    isAudit ? '' : hrPickCaptureRun(pick),
+    pick.gameTime || '',
+    pick.gamePk || '',
+    pick.batterId || '',
+    isAudit ? '' : (pick.predictionId || hrPredictionId(date, pick)),
   ];
 }
 
@@ -1626,7 +1759,7 @@ function renderSavedHrResults(saved, rows) {
   const homers = completed.filter(r => r.hr > 0).length;
   const list = rows.map(r => `
     <div class="pick-result-row">
-      <span>#${r.rank}</span>
+      <span>R${r.captureRun} #${r.rank}</span>
       <span>${r.name}</span>
       <span class="${r.status === 'pending' ? 'neutral' : r.hr > 0 ? 'good' : 'bad'}">${r.status === 'pending' ? 'Pending' : r.hr > 0 ? `HR ${r.hr}` : 'No HR'}</span>
     </div>`).join('');
@@ -1697,7 +1830,7 @@ async function getPitcherInfoThroughDate(id, endDate) {
   }
 }
 
-async function checkSavedHrPicks(saved = getSavedHrPicksForResults(), missingText = 'No saved HR picks yet. Tap "Save HR picks" first.') {
+async function checkSavedHrPicks(saved = getSavedHrPicksForResults(), missingText = 'No saved HR picks yet. Tap "Save new HR picks" first.') {
   const out = document.getElementById('hr-toolbar-output');
   if (!saved?.picks?.length) {
     if (out) out.textContent = missingText;
@@ -1719,6 +1852,7 @@ async function checkSavedHrPicks(saved = getSavedHrPicksForResults(), missingTex
       const batting = player?.stats?.batting;
       return {
         rank: pick.rank,
+        captureRun: hrPickCaptureRun(pick),
         name: pick.batterName,
         status: batting ? 'final' : 'pending',
         hr: batting?.homeRuns ?? '',
@@ -1737,7 +1871,7 @@ async function checkSavedHrPicks(saved = getSavedHrPicksForResults(), missingTex
 async function checkTodaysSavedHrPicks() {
   await checkSavedHrPicks(
     getSavedHrPicksForDate(todayStr()),
-    'No saved HR picks for today yet. Tap "Save HR picks" first.'
+    'No saved HR picks for today yet. Tap "Save new HR picks" first.'
   );
 }
 

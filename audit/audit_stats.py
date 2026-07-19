@@ -118,6 +118,7 @@ def source_analysis(label, rows, chance_col, factors):
     by_chance = defaultdict(list)
     by_hand = defaultdict(list)
     by_order = defaultdict(list)
+    by_capture_run = defaultdict(list)
     for r in rows:
         rank = num(r.get("Rank"))
         by_rank_bucket[rank_bucket(rank)].append(r)
@@ -125,11 +126,16 @@ def source_analysis(label, rows, chance_col, factors):
         by_hand[r.get("Pitcher Hand") or "missing"].append(r)
         order = num(r.get("Batting Order"))
         by_order[int(order) if order else "missing"].append(r)
+        capture_run = num(r.get("Capture Run"))
+        if capture_run is not None:
+            by_capture_run[int(capture_run)].append(r)
 
     print_grouped("By rank bucket", by_rank_bucket)
     print_grouped("By chance bucket", by_chance)
     print_grouped("By pitcher hand", by_hand)
     print_grouped("By batting order", by_order)
+    if by_capture_run:
+        print_grouped("By capture run", by_capture_run, min_count=1)
     factor_edges(rows, factors)
 
     print("\nCalibration")
@@ -160,6 +166,21 @@ def model_selection(row):
     if in_classic:
         return "classic"
     return "unknown"
+
+
+def dedupe_prediction_rows(rows):
+    seen = set()
+    unique = []
+    duplicates = 0
+    for row in rows:
+        prediction_id = str(row.get("Prediction ID") or "").strip()
+        if prediction_id and prediction_id in seen:
+            duplicates += 1
+            continue
+        if prediction_id:
+            seen.add(prediction_id)
+        unique.append(row)
+    return unique, duplicates
 
 
 def model_comparison(picks):
@@ -208,18 +229,23 @@ def fmt_mean(rows, field):
 def analyze(label, rows, chance_col, factors):
     print(f"\n\n##### {label} #####")
     rows = [r for r in rows if num(r.get("Outcome")) is not None]
+    raw_picks = [r for r in rows if (r.get("Source") or "").lower() == "pick"]
+    picks, duplicate_count = dedupe_prediction_rows(raw_picks)
+    if duplicate_count:
+        rows = [r for r in rows if (r.get("Source") or "").lower() != "pick"] + picks
     print(f"All source rows: {len(rows)}  Pooled outcome rate: {pct(outcome_rate(rows))}")
+    if duplicate_count:
+        print(f"Removed repeated saved predictions by Prediction ID: {duplicate_count}")
 
     by_source = defaultdict(list)
     for row in rows:
         by_source[(row.get("Source") or "missing").lower()].append(row)
     print_grouped("By source", by_source, min_count=1)
 
-    picks = [r for r in rows if (r.get("Source") or "").lower() == "pick"]
     audits = [r for r in rows if (r.get("Source") or "").lower() == "audit"]
 
     source_analysis("Full-slate audit rows", audits, chance_col, factors)
-    source_analysis("Saved pick rows (merged display rank)", picks, chance_col, factors)
+    source_analysis("Saved pick rows (capture-run rank)", picks, chance_col, factors)
     if picks:
         model_comparison(picks)
 
