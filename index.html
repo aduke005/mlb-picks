@@ -418,6 +418,28 @@ h1 {
 .model-chip.current { color: var(--green); }
 .model-chip.classic { color: var(--blue); }
 
+.bet-input-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  margin: 10px 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.bet-input-row input[type="number"] {
+  width: 92px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+}
+
 .tracker {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -588,12 +610,13 @@ const API    = 'https://statsapi.mlb.com/api/v1';
 const SEASON = new Date().getFullYear();
 const PICK_STORE_KEY = 'mlb-hit-picks-saved-v1';
 const PICK_HISTORY_KEY = 'mlb-hit-picks-history-v1';
-const PAGE_CACHE_KEY = 'mlb-hit-picks-page-cache-v1';
+const PAGE_CACHE_KEY = 'mlb-hit-picks-page-cache-v2';
 const FORCE_REFRESH_KEY = 'mlb-hit-picks-force-refresh-v1';
 const PAGE_CACHE_TTL = 15 * 60 * 1000;
 
 let currentPickDate = null;
 let currentTopPicks = [];
+let currentHitShadowPicks = [];
 let lastCheckedPickRows = null;
 let lastCheckedPickDate = null;
 let lastBacktestAuditRows = null;
@@ -612,13 +635,17 @@ const LEAGUE = {
 const MODEL = {
   batterPaPrior: 260,
   pitcherIpPrior: 70,
-  recentAbPrior: 45,
+  recentPaPrior: 45,
   minBatterPa: 45,
   maxPerPaHit: 0.48,
   calibrationDamp: 0.80,
   recentDays: 21,
   topPickCount: 10,
 };
+
+// Ranking and displayed probability are intentionally separate. Keep the
+// production ranking frozen while rolling calibration is evaluated offline.
+const HIT_DISPLAY_LOGIT_OFFSET = 0.0;
 
 // Park hit factors by home-team ID (FanGraphs 3-yr regressed hits, 2024)
 const PARK = {
@@ -664,6 +691,16 @@ const PLATOON = {
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+function applyLogitOffset(probability, offset = 0) {
+  const p = clamp(Number(probability) || 0, 0.0001, 0.9999);
+  const odds = p / (1 - p);
+  return clamp((odds * Math.exp(offset)) / (1 + (odds * Math.exp(offset))), 0.0001, 0.9999);
+}
+
+function hitDisplayProbability(rankProb) {
+  return applyLogitOffset(rankProb, HIT_DISPLAY_LOGIT_OFFSET);
+}
 
 function shrink(value, baseline, sample, prior) {
   const n = Math.max(0, Number(sample) || 0);
@@ -923,7 +960,7 @@ function hitGameEnvironmentFactors(candidates) {
   return factors;
 }
 
-function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor = 1.0, isAway = false) {
+function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor = 1.0, isAway = false, recentOptions = null) {
   const { hand: pitcherHand, obaa, era, whip, k9, recentERA } = pitcher;
 
   const platoonKey  = `${batterHand}v${pitcherHand}`;
@@ -949,11 +986,20 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor
     1 + 0.08 * ((batter.ops || LEAGUE.ops) - LEAGUE.ops) / LEAGUE.ops,
     0.92, 1.14
   );
-  const recentAdj = batter.recentHPerPa != null
+  const recentWeight = Number.isFinite(recentOptions?.weight) ? recentOptions.weight : 0.15;
+  const recentRate = batter.recentHPerPa != null && recentOptions?.shrinkSample
+    ? shrink(
+        batter.recentHPerPa,
+        seasonHPerPa,
+        batter.recentPa || batter.recentAb || 0,
+        MODEL.recentPaPrior
+      )
+    : batter.recentHPerPa;
+  const recentAdj = recentRate != null
     ? clamp(
-        1 + 0.15 * (batter.recentHPerPa - seasonHPerPa) / Math.max(seasonHPerPa, 0.05),
-        0.90,
-        1.10
+        1 + recentWeight * (recentRate - seasonHPerPa) / Math.max(seasonHPerPa, 0.05),
+        Number.isFinite(recentOptions?.clampMin) ? recentOptions.clampMin : 0.90,
+        Number.isFinite(recentOptions?.clampMax) ? recentOptions.clampMax : 1.10
       )
     : 1.0;
   const contactAdj = clamp(
@@ -999,9 +1045,11 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor
   const ePAs  = expectedPAs(lineupPos);
   const rawProb = 1 - Math.pow(1 - pHit, ePAs);
   const prob = calibrateProbability(rawProb, ePAs);
+  const rankProb = prob;
+  const displayProb = hitDisplayProbability(rankProb);
 
   return {
-    prob, rawProb, pHit, seasonHPerPa, platoon, pitcherWeakness, parkFactor, parkAdj,
+    prob: rankProb, rankProb, displayProb, rawProb, pHit, seasonHPerPa, platoon, pitcherWeakness, parkFactor, parkAdj,
     opsAdj, recentAdj, contactAdj, awayAdj, ttoAdj: ttoFactor(lineupPos), gameEnvFactor, ePAs,
     batterHand, pitcherHand, batterSplit, pitcherSplit, awaySplit, isAway,
   };
@@ -1038,8 +1086,22 @@ function classicScore(batter, pitcher, parkFactor, batterHand, lineupPos) {
   );
   const pHit = clamp(batterBase * pitcherWeakness * platoon * parkFactor, 0.05, 0.65);
   const ePAs = expectedPAs(lineupPos);
-  const prob = 1 - Math.pow(1 - pHit, ePAs);
-  return { prob, pHit, opsAdj, recentAdj, contactAdj, platoon, pitcherWeakness };
+  const rawProb = 1 - Math.pow(1 - pHit, ePAs);
+  // Classic is retained as a ranking experiment. Its historical probability
+  // scale is invalid, so the UI suppresses a classic percentage until a
+  // separately validated display calibrator exists.
+  return {
+    prob: rawProb,
+    rankProb: rawProb,
+    displayProb: null,
+    rawProb,
+    pHit,
+    opsAdj,
+    recentAdj,
+    contactAdj,
+    platoon,
+    pitcherWeakness,
+  };
 }
 
 // ─── Rendering ────────────────────────────────────────────────────────────────
@@ -1094,9 +1156,11 @@ function hitPickSummary(pick) {
 
 function renderCard(pick, rank) {
   const rankLabel = `Pick #${rank + 1}`;
-  const pct    = Math.round(pick.prob * 100);
+  const pct    = Math.round((pick.displayProb ?? pick.prob) * 100);
   const rawPct = Math.round((pick.rawProb ?? pick.prob) * 100);
-  const classicPct = pick.classicProb != null ? Math.round(pick.classicProb * 100) : null;
+  const classicPct = Number.isFinite(pick.classicDisplayProb)
+    ? Math.round(pick.classicDisplayProb * 100)
+    : null;
 
   const parkInfo = PARK[pick.homeTeamId];
   const parkName = parkInfo?.name ?? pick.venue;
@@ -1130,9 +1194,16 @@ function renderCard(pick, rank) {
   </div>
   <div class="model-compare">
     <span class="model-chip current">Current #${pick.currentRank ?? '?'} ${pct}%</span>
-    ${classicPct != null ? `<span class="model-chip classic">Classic #${pick.classicRank ?? '?'} ${classicPct}%</span>` : ''}
+    <span class="model-chip classic">Classic #${pick.classicRank ?? '?'}${classicPct != null ? ` ${classicPct}%` : ' · rank only'}</span>
   </div>
   <div class="inline-note">Before calibration: ${rawPct}% - single-trip hit rate: ${Math.round(pick.pHit * 100)}%</div>
+
+  <div class="bet-input-row">
+    <label>American odds
+      <input type="number" value="${pick.offeredAmericanOdds ?? ''}" placeholder="+120" oninput="setHitPickOdds('${pick.key}', this.value)">
+    </label>
+    <label><input type="checkbox" ${pick.betPlaced ? 'checked' : ''} onchange="setHitBetPlaced('${pick.key}', this.checked)"> Bet placed</label>
+  </div>
 
   <div class="matchup-line">vs ${pick.pitcherName} (${pick.pitcherHand === 'L' ? 'lefty pitcher' : 'righty pitcher'})</div>
   <div class="game-time">${pick.gameTime} · ${pick.venue}</div>
@@ -1224,15 +1295,9 @@ function renderCard(pick, rank) {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 function renderSummary(picks) {
-  let previousTier = null;
   const rows = picks.map((pick, i) => {
-    const tier = isConsensusPick(pick) ? 'consensus' : 'single';
-    const tierHeading = tier !== previousTier
-      ? `<div class="summary-tier">${tier === 'consensus' ? 'Selected by both models' : 'Single-model additions'}</div>`
-      : '';
-    previousTier = tier;
     return `
-    ${tierHeading}
+    ${i === 0 ? '<div class="summary-tier">Current top-10 picks selected by both models</div>' : ''}
     <div class="summary-row">
       <div class="summary-rank">#${i + 1}</div>
       <div class="summary-name">${pick.batterName}
@@ -1242,7 +1307,7 @@ function renderSummary(picks) {
         </div>
       </div>
       <div class="summary-time">${pick.gameTime || ''}</div>
-      <div class="summary-pct">${Math.round(pick.prob * 100)}%</div>
+      <div class="summary-pct">${Math.round((pick.displayProb ?? pick.prob) * 100)}%</div>
     </div>`;
   }).join('');
 
@@ -1253,12 +1318,59 @@ function renderSummary(picks) {
 </div>`;
 }
 
+function renderHitWatchlist(shadowPicks) {
+  const currentOnly = shadowPicks
+    .filter(pick => pick.inCurrentTop === true && pick.inClassicTop !== true)
+    .sort((a, b) => (a.currentRank || 999) - (b.currentRank || 999));
+  if (!currentOnly.length) return '';
+  return `
+<details class="summary-list">
+  <summary class="summary-title">Current-only watchlist (${currentOnly.length})</summary>
+  <div class="summary-tier">Not primary recommendations; retained for comparison</div>
+  ${currentOnly.map(pick => `
+    <div class="summary-row">
+      <div class="summary-rank">#${pick.currentRank ?? '?'}</div>
+      <div class="summary-name">${pick.batterName}</div>
+      <div class="summary-time">${pick.gameTime || ''}</div>
+      <div class="summary-pct">${pctText(pick.displayProb ?? pick.prob)}</div>
+    </div>`).join('')}
+</details>`;
+}
+
 function getPickHistory() {
   try {
     return JSON.parse(localStorage.getItem(PICK_HISTORY_KEY) || '{}');
   } catch {
     return {};
   }
+}
+
+function setHitPickOdds(key, value) {
+  const pick = currentTopPicks.find(item => item.key === key);
+  if (!pick) return;
+  pick.offeredAmericanOdds = value === '' ? '' : Number(value);
+  updateSavedHitBetFields(pick);
+  savePageCache();
+}
+
+function setHitBetPlaced(key, checked) {
+  const pick = currentTopPicks.find(item => item.key === key);
+  if (!pick) return;
+  pick.betPlaced = checked === true;
+  updateSavedHitBetFields(pick);
+  savePageCache();
+}
+
+function updateSavedHitBetFields(pick) {
+  if (!currentPickDate) return;
+  const saved = getSavedPicksForDate(currentPickDate);
+  if (!saved?.picks?.length) return;
+  const identity = pickIdentity(pick);
+  const savedPick = saved.picks.find(item => pickIdentity(item) === identity);
+  if (!savedPick) return;
+  savedPick.offeredAmericanOdds = pick.offeredAmericanOdds ?? '';
+  savedPick.betPlaced = pick.betPlaced === true;
+  storePickPayload(saved);
 }
 
 function pickIdentity(pick) {
@@ -1282,26 +1394,41 @@ function pickCaptureRun(pick) {
   return Number.isFinite(run) && run > 0 ? run : 1;
 }
 
+function hasHitTrackingRows(payload) {
+  return !!(payload?.picks?.length || payload?.shadowPicks?.length);
+}
+
 function normalizeSavedPickPayload(payload) {
   if (!payload?.date) return payload || null;
   const fallbackCapturedAt = payload.firstSavedAt || payload.savedAt || '';
   const picks = (payload.picks || []).map(pick => ({
     ...pick,
+    key: pick.key || pickIdentity(pick),
     capturedAt: pick.capturedAt || fallbackCapturedAt,
     captureRun: pickCaptureRun(pick),
     predictionId: pick.predictionId || hitPredictionId(payload.date, pick),
   }));
+  const shadowPicks = (payload.shadowPicks || []).map(pick => ({
+    ...pick,
+    rank: null,
+    key: pick.key || pickIdentity(pick),
+    capturedAt: pick.capturedAt || fallbackCapturedAt,
+    captureRun: pickCaptureRun(pick),
+    predictionId: pick.predictionId || hitPredictionId(payload.date, pick),
+  }));
+  const trackedRows = [...picks, ...shadowPicks];
   const captureCount = Math.max(
     Number.parseInt(payload.captureCount, 10) || 0,
-    picks.length ? 1 : 0,
-    ...picks.map(pickCaptureRun)
+    trackedRows.length ? 1 : 0,
+    ...trackedRows.map(pickCaptureRun)
   );
   return {
     ...payload,
     firstSavedAt: fallbackCapturedAt,
-    modelMetadataVersion: Math.max(payload.modelMetadataVersion || 1, 2),
+    modelMetadataVersion: Math.max(payload.modelMetadataVersion || 1, 4),
     captureCount,
     picks,
+    shadowPicks,
   };
 }
 
@@ -1328,7 +1455,7 @@ function getSavedPicksForResults() {
 function pickSavedPayload(history, options = {}) {
   const values = Object.values(history || {})
     .map(normalizeSavedPickPayload)
-    .filter(p => p?.date && p?.picks?.length);
+    .filter(p => p?.date && hasHitTrackingRows(p));
   if (!values.length) return null;
   values.sort((a, b) => b.date.localeCompare(a.date));
   if (options.pastOnly) {
@@ -1360,12 +1487,14 @@ function renderPickTracker() {
   const saved = (currentPickDate && getSavedPicksForDate(currentPickDate)) || getSavedPicksForResults();
   const captureCount = savedCaptureCount(saved);
   const savedText = saved
-    ? `Saved ${saved.picks.length} picks across ${captureCount} save round${captureCount === 1 ? '' : 's'} for ${formatDate(saved.date)}.`
-    : 'Save new picks when you want this displayed list to become the locked list for tracking.';
+    ? `Saved ${saved.picks.length} primary pick${saved.picks.length === 1 ? '' : 's'} and ` +
+      `${saved.shadowPicks.length} shadow candidate${saved.shadowPicks.length === 1 ? '' : 's'} across ` +
+      `${captureCount} save round${captureCount === 1 ? '' : 's'} for ${formatDate(saved.date)}.`
+    : 'Save this slate when you want its primary picks and shadow candidates locked for tracking.';
 
   return `
 <div class="tracker">
-  <div class="tracker-title">Track These Picks</div>
+  <div class="tracker-title">Track This Slate</div>
   <div class="tracker-actions">
     <button onclick="saveCurrentPicks()">Save new picks</button>
     <button onclick="replaceCurrentPicks()">Replace saved picks</button>
@@ -1409,17 +1538,20 @@ function isConsensusPick(pick) {
 function compareHitDisplayPicks(a, b) {
   const consensusOrder = Number(isConsensusPick(b)) - Number(isConsensusPick(a));
   if (consensusOrder) return consensusOrder;
-  return (b.prob - a.prob)
+  return ((b.rankProb ?? b.prob) - (a.rankProb ?? a.prob))
     || ((a.currentRank || 999) - (b.currentRank || 999))
     || ((a.classicRank || 999) - (b.classicRank || 999));
 }
 
-function mergedModelPicks(picks) {
-  rankPicks(picks, 'prob', 'currentRank');
-  rankPicks(picks, 'classicProb', 'classicRank');
-
-  const currentTop = limitSameGameAndTeam([...picks].sort((a, b) => b.prob - a.prob), 2);
-  const classicTop = limitSameGameAndTeam([...picks].sort((a, b) => b.classicProb - a.classicProb), 2);
+function hitModelPickLists(picks) {
+  const currentTop = limitSameGameAndTeam(
+    [...picks].sort((a, b) => (b.rankProb ?? b.prob) - (a.rankProb ?? a.prob)),
+    2
+  );
+  const classicTop = limitSameGameAndTeam(
+    [...picks].sort((a, b) => (b.classicRankProb ?? b.classicProb) - (a.classicRankProb ?? a.classicProb)),
+    2
+  );
   const merged = new Map();
 
   for (const pick of currentTop) merged.set(pick.key, { ...pick, inCurrentTop: true, inClassicTop: false });
@@ -1429,17 +1561,96 @@ function mergedModelPicks(picks) {
     else merged.set(pick.key, { ...pick, inCurrentTop: false, inClassicTop: true });
   }
 
-  return [...merged.values()].sort(compareHitDisplayPicks);
+  const union = [...merged.values()].sort(compareHitDisplayPicks);
+  const primary = union
+    .filter(pick => isConsensusPick(pick) && (pick.currentRank || 999) <= MODEL.topPickCount)
+    .sort((a, b) => (a.currentRank || 999) - (b.currentRank || 999));
+  const primaryKeys = new Set(primary.map(pick => pick.key));
+  const shadow = union
+    .filter(pick => !primaryKeys.has(pick.key))
+    .map(pick => ({
+      ...pick,
+      selectionTier: pick.inCurrentTop ? 'current-watchlist' : 'classic-only',
+    }));
+
+  return { primary, shadow, union };
 }
 
-function pickPayload(pick, idx, capturedAt, captureRun, date = currentPickDate) {
+function scoreHitRecencyShadows(candidates, gameEnvFactors) {
+  const variants = [
+    { field: 'recent15RankProb', rank: 'recent15Rank', weight: 0.15, shrinkSample: true },
+    { field: 'recent05RankProb', rank: 'recent05Rank', weight: 0.05, shrinkSample: false },
+    { field: 'recent00RankProb', rank: 'recent00Rank', weight: 0.00, shrinkSample: false },
+  ];
+
+  for (const pick of candidates) {
+    const gameEnvFactor = gameEnvFactors.get(pick.gamePk) ?? 1.0;
+    for (const variant of variants) {
+      const shadow = score(
+        pick.batter,
+        pick.pitcher,
+        pick.parkFactor,
+        pick.batterHand,
+        pick.lineupPos,
+        gameEnvFactor,
+        pick.side === 'away',
+        { weight: variant.weight, shrinkSample: variant.shrinkSample }
+      );
+      pick[variant.field] = shadow.rankProb;
+    }
+    pick.recentSamplePa = pick.batter?.recentPa ?? null;
+  }
+
+  for (const variant of variants) rankPicks(candidates, variant.field, variant.rank);
+}
+
+function hitShadowTrackingPicks(candidates, lists) {
+  const primaryByKey = new Map(lists.primary.map(pick => [pick.key, pick]));
+  const unionByKey = new Map(lists.union.map(pick => [pick.key, pick]));
+  const tracked = new Map(lists.shadow.map(pick => [pick.key, { ...pick }]));
+  const variants = [
+    { field: 'recent15RankProb', flag: 'inRecent15Top', label: 'recent-0.15-shrunk' },
+    { field: 'recent05RankProb', flag: 'inRecent05Top', label: 'recent-0.05-unshrunk' },
+    { field: 'recent00RankProb', flag: 'inRecent00Top', label: 'recent-0' },
+  ];
+
+  for (const variant of variants) {
+    const top = limitSameGameAndTeam(
+      [...candidates].sort((a, b) => b[variant.field] - a[variant.field]),
+      2
+    );
+    for (const pick of top) {
+      const primary = primaryByKey.get(pick.key);
+      if (primary) {
+        primary[variant.flag] = true;
+        continue;
+      }
+      const existing = tracked.get(pick.key) || { ...pick, ...(unionByKey.get(pick.key) || {}) };
+      existing[variant.flag] = true;
+      const labels = new Set(String(existing.selectionTier || '').split(',').filter(Boolean));
+      labels.add(variant.label);
+      existing.selectionTier = [...labels].join(',');
+      tracked.set(pick.key, existing);
+    }
+  }
+
+  return [...tracked.values()];
+}
+
+function pickPayload(pick, idx, capturedAt, captureRun, date = currentPickDate, options = {}) {
   return {
-    rank: idx + 1,
+    key: pick.key || pickIdentity(pick),
+    rank: options.isShadow ? null : idx + 1,
     currentRank: Number.isFinite(pick.currentRank) ? pick.currentRank : null,
     classicRank: Number.isFinite(pick.classicRank) ? pick.classicRank : null,
-    classicProb: Number.isFinite(pick.classicProb) ? pick.classicProb : null,
-    inCurrentTop: typeof pick.inCurrentTop === 'boolean' ? pick.inCurrentTop : null,
-    inClassicTop: typeof pick.inClassicTop === 'boolean' ? pick.inClassicTop : null,
+    classicProb: Number.isFinite(pick.classicRankProb ?? pick.classicProb) ? (pick.classicRankProb ?? pick.classicProb) : null,
+    classicRankProb: Number.isFinite(pick.classicRankProb ?? pick.classicProb) ? (pick.classicRankProb ?? pick.classicProb) : null,
+    classicDisplayProb: Number.isFinite(pick.classicDisplayProb) ? pick.classicDisplayProb : null,
+    inCurrentTop: pick.inCurrentTop === true,
+    inClassicTop: pick.inClassicTop === true,
+    inRecent15Top: pick.inRecent15Top === true,
+    inRecent05Top: pick.inRecent05Top === true,
+    inRecent00Top: pick.inRecent00Top === true,
     gamePk: pick.gamePk,
     side: pick.side,
     batterId: pick.batterId,
@@ -1448,7 +1659,9 @@ function pickPayload(pick, idx, capturedAt, captureRun, date = currentPickDate) 
     pitcherName: pick.pitcherName,
     pitcherHand: pick.pitcherHand,
     lineupPos: pick.lineupPos,
-    prob: pick.prob,
+    prob: pick.rankProb ?? pick.prob,
+    rankProb: pick.rankProb ?? pick.prob,
+    displayProb: pick.displayProb ?? pick.prob,
     rawProb: pick.rawProb,
     pHit: pick.pHit,
     pitcherWeakness: pick.pitcherWeakness,
@@ -1459,10 +1672,21 @@ function pickPayload(pick, idx, capturedAt, captureRun, date = currentPickDate) 
     parkFactor: pick.parkFactor,
     parkAdj: pick.parkAdj ?? pick.parkFactor,
     recentAdj: pick.recentAdj,
+    recent15Rank: pick.recent15Rank,
+    recent15RankProb: pick.recent15RankProb,
+    recent05Rank: pick.recent05Rank,
+    recent05RankProb: pick.recent05RankProb,
+    recent00Rank: pick.recent00Rank,
+    recent00RankProb: pick.recent00RankProb,
+    recentSamplePa: pick.batter?.recentPa ?? pick.recentSamplePa ?? null,
     contactAdj: pick.contactAdj,
     opsAdj: pick.opsAdj,
     gameTime: pick.gameTime,
     venue: pick.venue,
+    selectionTier: pick.selectionTier || 'primary',
+    calibrationOffset: HIT_DISPLAY_LOGIT_OFFSET,
+    offeredAmericanOdds: pick.offeredAmericanOdds ?? '',
+    betPlaced: pick.betPlaced === true,
     capturedAt,
     captureRun,
     predictionId: hitPredictionId(date, pick),
@@ -1474,10 +1698,13 @@ function currentPickPayload(capturedAt = new Date().toISOString(), captureRun = 
     date: currentPickDate,
     savedAt: capturedAt,
     firstSavedAt: capturedAt,
-    modelMetadataVersion: 2,
+    modelMetadataVersion: 4,
     captureCount: captureRun,
     picks: currentTopPicks.map((pick, idx) =>
       pickPayload(pick, idx, capturedAt, captureRun, currentPickDate)
+    ),
+    shadowPicks: currentHitShadowPicks.map((pick, idx) =>
+      pickPayload(pick, idx, capturedAt, captureRun, currentPickDate, { isShadow: true })
     ),
   };
 }
@@ -1489,6 +1716,9 @@ function appendCurrentPickPayload(existing) {
   const incoming = currentTopPicks.map((pick, idx) =>
     pickPayload(pick, idx, capturedAt, captureRun, currentPickDate)
   );
+  const incomingShadow = currentHitShadowPicks.map((pick, idx) =>
+    pickPayload(pick, idx, capturedAt, captureRun, currentPickDate, { isShadow: true })
+  );
   const seen = new Set(saved.picks.map(pickIdentity));
   const added = [];
 
@@ -1499,8 +1729,30 @@ function appendCurrentPickPayload(existing) {
     added.push(pick);
   }
 
-  if (!added.length) {
-    return { payload: saved, addedCount: 0, duplicateCount: incoming.length, captureRun: null };
+  const primaryIdentities = new Set([...saved.picks, ...added].map(pickIdentity));
+  const shadowByIdentity = new Map(
+    (saved.shadowPicks || []).map(pick => [pickIdentity(pick), pick])
+  );
+  for (const identity of primaryIdentities) shadowByIdentity.delete(identity);
+  let shadowAddedCount = 0;
+  let shadowUpdatedCount = 0;
+  for (const pick of incomingShadow) {
+    const identity = pickIdentity(pick);
+    if (primaryIdentities.has(identity)) continue;
+    if (shadowByIdentity.has(identity)) shadowUpdatedCount += 1;
+    else shadowAddedCount += 1;
+    shadowByIdentity.set(identity, pick);
+  }
+
+  if (!added.length && !shadowAddedCount && !shadowUpdatedCount) {
+    return {
+      payload: saved,
+      addedCount: 0,
+      shadowAddedCount: 0,
+      shadowUpdatedCount: 0,
+      duplicateCount: incoming.length,
+      captureRun: null,
+    };
   }
 
   return {
@@ -1508,11 +1760,14 @@ function appendCurrentPickPayload(existing) {
       ...saved,
       savedAt: capturedAt,
       firstSavedAt: saved.firstSavedAt || saved.savedAt || capturedAt,
-      modelMetadataVersion: 2,
+      modelMetadataVersion: 4,
       captureCount: captureRun,
       picks: [...saved.picks, ...added],
+      shadowPicks: [...shadowByIdentity.values()],
     },
     addedCount: added.length,
+    shadowAddedCount,
+    shadowUpdatedCount,
     duplicateCount: incoming.length - added.length,
     captureRun,
   };
@@ -1520,16 +1775,19 @@ function appendCurrentPickPayload(existing) {
 
 function saveCurrentPicks() {
   const out = document.getElementById('tracker-output');
-  if (!currentPickDate || !currentTopPicks.length) {
-    if (out) out.textContent = 'No picks are loaded yet.';
+  if (!currentPickDate || (!currentTopPicks.length && !currentHitShadowPicks.length)) {
+    if (out) out.textContent = 'No primary picks or shadow candidates are loaded yet.';
     return;
   }
 
   const existing = getSavedPicksForDate(currentPickDate);
-  if (existing?.picks?.length) {
+  if (hasHitTrackingRows(existing)) {
     const merged = appendCurrentPickPayload(existing);
-    if (!merged.addedCount) {
-      if (out) out.textContent = `No new batter/game picks to add. The ${existing.picks.length} saved picks remain unchanged.`;
+    if (!merged.addedCount && !merged.shadowAddedCount && !merged.shadowUpdatedCount) {
+      if (out) {
+        out.textContent = `No new batter/game rows to add. The ${existing.picks.length} primary picks and ` +
+          `${existing.shadowPicks.length} shadow candidates remain unchanged.`;
+      }
       return;
     }
     const payload = storePickPayload(merged.payload);
@@ -1537,7 +1795,8 @@ function saveCurrentPicks() {
     lastCheckedPickDate = null;
     if (out) {
       out.textContent = `Added ${merged.addedCount} new picks in save round ${merged.captureRun}. ` +
-        `Kept ${payload.picks.length - merged.addedCount} earlier picks unchanged.`;
+        `Added ${merged.shadowAddedCount} and refreshed ${merged.shadowUpdatedCount} shadow candidates; ` +
+        `kept ${payload.picks.length - merged.addedCount} earlier picks unchanged.`;
     }
     savePageCache();
     return;
@@ -1546,26 +1805,32 @@ function saveCurrentPicks() {
   const payload = storePickPayload(currentPickPayload());
   lastCheckedPickRows = null;
   lastCheckedPickDate = null;
-  if (out) out.textContent = `Saved ${payload.picks.length} picks in save round 1 for ${formatDate(payload.date)}.`;
+  if (out) {
+    out.textContent = `Saved ${payload.picks.length} primary picks and ${payload.shadowPicks.length} ` +
+      `shadow candidates in save round 1 for ${formatDate(payload.date)}.`;
+  }
   savePageCache();
 }
 
 function replaceCurrentPicks() {
   const out = document.getElementById('tracker-output');
-  if (!currentPickDate || !currentTopPicks.length) {
-    if (out) out.textContent = 'No picks are loaded yet.';
+  if (!currentPickDate || (!currentTopPicks.length && !currentHitShadowPicks.length)) {
+    if (out) out.textContent = 'No primary picks or shadow candidates are loaded yet.';
     return;
   }
 
   const payload = storePickPayload(currentPickPayload());
   lastCheckedPickRows = null;
   lastCheckedPickDate = null;
-  if (out) out.textContent = `Replaced saved picks for ${formatDate(payload.date)} with ${payload.picks.length} picks in a new save round 1.`;
+  if (out) {
+    out.textContent = `Replaced the saved slate for ${formatDate(payload.date)} with ${payload.picks.length} ` +
+      `primary picks and ${payload.shadowPicks.length} shadow candidates in a new save round 1.`;
+  }
   savePageCache();
 }
 
 function autoSaveCurrentPicks() {
-  if (!currentPickDate || !currentTopPicks.length) return;
+  if (!currentPickDate || (!currentTopPicks.length && !currentHitShadowPicks.length)) return;
   if (hasSavedPicksForDate(currentPickDate)) return;
   storePickPayload(currentPickPayload());
 }
@@ -1597,8 +1862,13 @@ const ANALYSIS_COLUMNS = [
   'Venue',
   'Current Rank',
   'Current Chance',
+  'Rank Probability',
+  'Display Probability',
+  'Calibration Offset',
   'Classic Rank',
   'Classic Chance',
+  'Classic Rank Probability',
+  'Classic Display Probability',
   'In Current Top',
   'In Classic Top',
   'Selected By',
@@ -1608,6 +1878,19 @@ const ANALYSIS_COLUMNS = [
   'Game PK',
   'Batter ID',
   'Prediction ID',
+  'Selection Tier',
+  'In Recent 0.15 Shrunk Top',
+  'In Recent 0.05 Unshrunk Top',
+  'In Recent 0 Top',
+  'Recent 0.15 Shrunk Rank',
+  'Recent 0.15 Shrunk Chance',
+  'Recent 0.05 Unshrunk Rank',
+  'Recent 0.05 Unshrunk Chance',
+  'Recent 0 Rank',
+  'Recent 0 Chance',
+  'Recent Sample PA',
+  'Offered American Odds',
+  'Bet Placed',
 ];
 
 function pctText(value) {
@@ -1643,10 +1926,10 @@ function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '',
   return [
     source,
     date,
-    pick.rank,
+    source === 'shadow' ? '' : pick.rank,
     pick.batterName,
     pick.batterTeam,
-    pctText(pick.prob),
+    pctText(pick.displayProb ?? pick.prob),
     result,
     outcome,
     hits,
@@ -1666,9 +1949,14 @@ function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '',
     pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
     pick.venue,
     Number.isFinite(pick.currentRank) ? pick.currentRank : (isAudit ? pick.rank : ''),
-    decText(pick.prob, 4),
+    decText(pick.rankProb ?? pick.prob, 4),
+    decText(pick.rankProb ?? pick.prob, 4),
+    decText(pick.displayProb ?? pick.prob, 4),
+    decText(pick.calibrationOffset ?? HIT_DISPLAY_LOGIT_OFFSET, 4),
     Number.isFinite(pick.classicRank) ? pick.classicRank : '',
-    decText(pick.classicProb, 4),
+    decText(pick.classicDisplayProb, 4),
+    decText(pick.classicRankProb ?? pick.classicProb, 4),
+    decText(pick.classicDisplayProb, 4),
     isAudit ? '' : savedModelFlag(pick.inCurrentTop),
     isAudit ? '' : savedModelFlag(pick.inClassicTop),
     isAudit ? '' : savedModelSelection(pick),
@@ -1678,6 +1966,19 @@ function savedPickToAnalysisRow(date, pick, result = '', hits = '', atBats = '',
     pick.gamePk || '',
     pick.batterId || '',
     isAudit ? '' : (pick.predictionId || hitPredictionId(date, pick)),
+    isAudit ? 'audit' : (pick.selectionTier || (source === 'shadow' ? 'shadow' : 'primary')),
+    isAudit ? '' : savedModelFlag(pick.inRecent15Top),
+    isAudit ? '' : savedModelFlag(pick.inRecent05Top),
+    isAudit ? '' : savedModelFlag(pick.inRecent00Top),
+    Number.isFinite(pick.recent15Rank) ? pick.recent15Rank : '',
+    decText(pick.recent15RankProb, 4),
+    Number.isFinite(pick.recent05Rank) ? pick.recent05Rank : '',
+    decText(pick.recent05RankProb, 4),
+    Number.isFinite(pick.recent00Rank) ? pick.recent00Rank : '',
+    decText(pick.recent00RankProb, 4),
+    pick.recentSamplePa ?? pick.batter?.recentPa ?? '',
+    isAudit ? '' : (pick.offeredAmericanOdds ?? ''),
+    isAudit ? '' : (pick.betPlaced === true ? 1 : pick.betPlaced === false ? 0 : ''),
   ];
 }
 
@@ -1734,6 +2035,7 @@ async function copyText(text, successMessage) {
 function renderSavedPickResults(saved, rows) {
   const completed = rows.filter(r => r.status !== 'pending');
   const hits = completed.filter(r => r.hit).length;
+  const resultLabel = saved.picks.length ? 'primary picks' : 'shadow candidates';
   const brier = completed.length
     ? completed.reduce((sum, r) => sum + Math.pow(r.prob - (r.hit ? 1 : 0), 2), 0) / completed.length
     : 0;
@@ -1746,26 +2048,28 @@ function renderSavedPickResults(saved, rows) {
 
   return `
     <div><strong>${formatDate(saved.date)}</strong></div>
-    <div>${completed.length}/${rows.length} picks final. Hit rate: ${completed.length ? Math.round(hits / completed.length * 100) : 0}%. Brier: ${completed.length ? brier.toFixed(3) : 'n/a'}.</div>
+    <div>${completed.length}/${rows.length} ${resultLabel} final. Hit rate: ${completed.length ? Math.round(hits / completed.length * 100) : 0}%. Brier: ${completed.length ? brier.toFixed(3) : 'n/a'}.</div>
     <div style="margin-top:8px">${list}</div>`;
 }
 
 async function checkSavedPicks(saved = getSavedPicksForResults(), missingText = 'No saved picks yet. Tap "Save new picks" first.') {
   const out = document.getElementById('tracker-output');
-  if (!saved?.picks?.length) {
+  if (!hasHitTrackingRows(saved)) {
     if (out) out.textContent = missingText;
     return;
   }
+
+  const resultPicks = saved.picks.length ? saved.picks : saved.shadowPicks;
 
   if (out) out.textContent = 'Checking final boxscores...';
 
   try {
     const boxscores = new Map();
-    await Promise.all([...new Set(saved.picks.map(p => p.gamePk).filter(Boolean))].map(async gamePk => {
+    await Promise.all([...new Set(resultPicks.map(p => p.gamePk).filter(Boolean))].map(async gamePk => {
       boxscores.set(gamePk, await getBoxscore(gamePk));
     }));
 
-    const rows = saved.picks.map(pick => {
+    const rows = resultPicks.map(pick => {
       const box = boxscores.get(pick.gamePk);
       const player = Object.values(box?.teams?.[pick.side]?.players || {})
         .find(p => p.person?.id === pick.batterId);
@@ -1774,7 +2078,7 @@ async function checkSavedPicks(saved = getSavedPicksForResults(), missingText = 
         rank: pick.rank,
         captureRun: pickCaptureRun(pick),
         name: pick.batterName,
-        prob: pick.prob,
+        prob: pick.displayProb ?? pick.prob,
         status: batting ? 'final' : 'pending',
         hit: batting ? (batting.hits || 0) > 0 : false,
         hits: batting?.hits ?? '',
@@ -1806,14 +2110,18 @@ async function checkPastSavedPicks() {
 }
 
 async function getSavedRowsWithResults(saved = getSavedPicksForResults()) {
-  if (!saved?.picks?.length) return null;
+  if (!hasHitTrackingRows(saved)) return null;
 
+  const tracked = [
+    ...saved.picks.map(pick => ({ pick, source: 'pick' })),
+    ...(saved.shadowPicks || []).map(pick => ({ pick, source: 'shadow' })),
+  ];
   const boxscores = new Map();
-  await Promise.all([...new Set(saved.picks.map(p => p.gamePk).filter(Boolean))].map(async gamePk => {
+  await Promise.all([...new Set(tracked.map(row => row.pick.gamePk).filter(Boolean))].map(async gamePk => {
     boxscores.set(gamePk, await getBoxscore(gamePk));
   }));
 
-  const rows = saved.picks.map(pick => {
+  const rows = tracked.map(({ pick, source }) => {
     const box = boxscores.get(pick.gamePk);
     const player = Object.values(box?.teams?.[pick.side]?.players || {})
       .find(p => p.person?.id === pick.batterId);
@@ -1826,6 +2134,7 @@ async function getSavedRowsWithResults(saved = getSavedPicksForResults()) {
       result: batting ? (hits > 0 ? 'Hit' : 'Miss') : 'Pending',
       hits,
       atBats,
+      source,
     };
   });
 
@@ -1845,7 +2154,8 @@ async function copyAnalysisRowsForSheets() {
     row.pick,
     row.result,
     row.hits,
-    row.atBats
+    row.atBats,
+    row.source
   ));
 
   await copyText(
@@ -1883,9 +2193,10 @@ async function copyBacktestCombinedRows() {
     ? pickData.rows.map(row => savedPickToAnalysisRow(
         pickData.saved.date,
         row.pick,
-        row.result,
-        row.hits,
-        row.atBats
+      row.result,
+      row.hits,
+      row.atBats,
+      row.source
       ))
     : [];
   const auditRows = lastBacktestAuditRows.map(auditRowToAnalysisRow);
@@ -1906,6 +2217,8 @@ window.checkPastSavedPicks = checkPastSavedPicks;
 window.copyAnalysisRowsForSheets = copyAnalysisRowsForSheets;
 window.copyBacktestAuditRows = copyBacktestAuditRows;
 window.copyBacktestCombinedRows = copyBacktestCombinedRows;
+window.setHitPickOdds = setHitPickOdds;
+window.setHitBetPlaced = setHitBetPlaced;
 
 function renderBacktestPanel(defaultDate = addDays(todayStr(), -1)) {
   return `
@@ -2307,7 +2620,9 @@ async function main() {
       batter:      { ...bs },
       pitcher,
       ...s,
-      classicProb: classic.prob,
+      classicProb: classic.rankProb,
+      classicRankProb: classic.rankProb,
+      classicDisplayProb: classic.displayProb,
       classicPHit: classic.pHit,
     });
   }
@@ -2319,14 +2634,16 @@ async function main() {
       pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, gameEnvFactor, pick.side === 'away'
     ));
     const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos);
-    pick.classicProb = classic.prob;
+    pick.classicProb = classic.rankProb;
+    pick.classicRankProb = classic.rankProb;
+    pick.classicDisplayProb = classic.displayProb;
     pick.classicPHit = classic.pHit;
   }
-  rankPicks(candidates, 'prob', 'currentRank');
-  rankPicks(candidates, 'classicProb', 'classicRank');
+  rankPicks(candidates, 'rankProb', 'currentRank');
+  rankPicks(candidates, 'classicRankProb', 'classicRank');
   const top30Keys = new Set([
-    ...[...candidates].sort((a, b) => b.prob - a.prob).slice(0, 30).map(p => p.key),
-    ...[...candidates].sort((a, b) => b.classicProb - a.classicProb).slice(0, 30).map(p => p.key),
+    ...[...candidates].sort((a, b) => b.rankProb - a.rankProb).slice(0, 30).map(p => p.key),
+    ...[...candidates].sort((a, b) => b.classicRankProb - a.classicRankProb).slice(0, 30).map(p => p.key),
   ]);
   const top30 = candidates.filter(p => top30Keys.has(p.key));
 
@@ -2367,26 +2684,41 @@ async function main() {
       pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, gameEnvFactor, pick.side === 'away'
     ));
     const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos);
-    pick.classicProb = classic.prob;
+    pick.classicProb = classic.rankProb;
+    pick.classicRankProb = classic.rankProb;
+    pick.classicDisplayProb = classic.displayProb;
     pick.classicPHit = classic.pHit;
   }
 
-  const topPicks = mergedModelPicks(top30);
+  rankPicks(candidates, 'rankProb', 'currentRank');
+  rankPicks(candidates, 'classicRankProb', 'classicRank');
+  scoreHitRecencyShadows(candidates, gameEnvFactors);
+  const lists = hitModelPickLists(top30);
+  const topPicks = lists.primary;
+  const shadowPicks = hitShadowTrackingPicks(candidates, lists);
+
+  currentPickDate = date;
+  currentTopPicks = topPicks;
+  currentHitShadowPicks = shadowPicks;
 
   if (!topPicks.length) {
+    const emptyState = shadowPicks.length
+      ? `<div class="info-box"><strong>No Primary Picks Today</strong>No candidate was selected by both models while also ranking in the current model's top 10. This can be a legitimate thin slate, not a data failure. The ${shadowPicks.length} excluded candidates remain available as shadow rows.</div>`
+      : `<div class="info-box"><strong>No Actionable Picks Today</strong>No candidates had enough usable lineup and player data. Try again after lineups and probable pitchers are confirmed.</div>`;
     show(
+      renderHitWatchlist(shadowPicks) +
       renderPickTracker() +
-      `<div class="info-box"><strong>No More Actionable Picks</strong>Remaining games may be final, missing lineups, or missing enough player data.</div>`
+      emptyState +
+      renderBacktestPanel()
     );
     savePageCache();
     return;
   }
 
-  currentPickDate = date;
-  currentTopPicks = topPicks;
-
   show(
     renderSummary(topPicks) +
+    `<div class="note">Primary recommendations require both models and a current-model rank of 10 or better. ${shadowPicks.length} excluded candidates are still saved as shadow rows for evaluation.</div>` +
+    renderHitWatchlist(shadowPicks) +
     renderPickTracker() +
     topPicks.map((p, i) => renderCard(p, i)).join('') +
     `<button class="refresh-btn" onclick="refreshPage()">↻ Refresh</button>` +
@@ -2425,6 +2757,7 @@ function savePageCache() {
       updatedAt: document.getElementById('updated-at')?.textContent || '',
       currentPickDate,
       currentTopPicks,
+      currentHitShadowPicks,
       savedStateStamp: savedStateStamp(currentPickDate),
     }));
   } catch {}
@@ -2441,6 +2774,7 @@ function restorePageCache() {
     document.getElementById('updated-at').textContent = cached.updatedAt || '';
     currentPickDate = cached.currentPickDate || null;
     currentTopPicks = cached.currentTopPicks || [];
+    currentHitShadowPicks = cached.currentHitShadowPicks || [];
     return true;
   } catch {
     return false;
@@ -2456,6 +2790,7 @@ function captureTimeLabel(value) {
 
 function renderSavedPickSnapshot(saved) {
   const normalized = normalizeSavedPickPayload(saved);
+  const hasPrimary = normalized.picks.length > 0;
   let previousRun = null;
   const rows = normalized.picks.map(pick => {
     const run = pickCaptureRun(pick);
@@ -2469,19 +2804,27 @@ function renderSavedPickSnapshot(saved) {
     <div class="summary-row">
       <div class="summary-rank">#${pick.rank}</div>
       <div class="summary-name">${pick.batterName}</div>
-      <div class="summary-pct">${pctText(pick.prob)}</div>
+      <div class="summary-pct">${pctText(pick.displayProb ?? pick.prob)}</div>
     </div>`;
   }).join('');
+  const shadowSummary = normalized.shadowPicks.length
+    ? `<div class="summary-tier">${normalized.shadowPicks.length} shadow candidate${normalized.shadowPicks.length === 1 ? '' : 's'} retained for evaluation.</div>`
+    : '';
 
   return `
 <div class="summary-list">
-  <div class="summary-title">Locked Saved Picks</div>
+  <div class="summary-title">${hasPrimary ? 'Locked Saved Picks' : 'Locked Shadow-Only Slate'}</div>
+  ${hasPrimary ? '' : '<div class="summary-tier">No batter met the primary selection rule on this slate.</div>'}
   ${rows}
+  ${shadowSummary}
 </div>
+${hasPrimary ? '' : renderHitWatchlist(normalized.shadowPicks)}
 ${renderPickTracker()}
 <div class="info-box">
-  <strong>Showing saved picks for ${formatDate(normalized.date)}</strong>
-  These are the locked picks used for result checks and completed-row copies.
+  <strong>Showing the saved slate for ${formatDate(normalized.date)}</strong>
+  ${hasPrimary
+    ? 'Primary picks are shown above; shadow candidates remain available in analysis exports.'
+    : 'There were no primary recommendations, but the shadow candidates remain available for result checks and analysis exports.'}
   Use the refresh button only when you want to run a new model list.
 </div>
 ${renderBacktestPanel()}`;
@@ -2489,9 +2832,10 @@ ${renderBacktestPanel()}`;
 
 function restoreSavedPickView() {
   const saved = getSavedPicksForDate(todayStr()) || getSavedPicksForResults();
-  if (!saved?.picks?.length) return false;
+  if (!hasHitTrackingRows(saved)) return false;
   currentPickDate = saved.date;
   currentTopPicks = saved.picks;
+  currentHitShadowPicks = saved.shadowPicks || [];
   document.getElementById('date-label').textContent = `${formatDate(saved.date)} saved`;
   document.getElementById('updated-at').textContent = `Saved ${new Date(saved.savedAt || Date.now()).toLocaleString()}`;
   show(renderSavedPickSnapshot(saved));

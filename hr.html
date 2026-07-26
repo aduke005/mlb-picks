@@ -199,6 +199,28 @@ h1 {
 .model-chip.current { color: var(--green); }
 .model-chip.classic { color: var(--blue); }
 
+.bet-input-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  margin: 10px 0;
+  padding: 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.bet-input-row input[type="number"] {
+  width: 92px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px;
+}
+
 .note {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -569,6 +591,10 @@ const MODEL = {
   calibrationDamp: 0.66,
 };
 
+// Kept at zero while rolling, time-split display calibration is evaluated.
+// Ranking continues to use the shipped probability unchanged.
+const HR_DISPLAY_LOGIT_OFFSET = 0.0;
+
 const HR_PARK = {
   115: { factor: 1.24, name: 'Coors Field' },
   147: { factor: 1.18, name: 'Yankee Stadium' },
@@ -609,6 +635,16 @@ const PLATOON = {
 };
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+function applyLogitOffset(probability, offset = 0) {
+  const p = clamp(Number(probability) || 0, 0.0001, 0.9999);
+  const odds = p / (1 - p);
+  return clamp((odds * Math.exp(offset)) / (1 + (odds * Math.exp(offset))), 0.0001, 0.9999);
+}
+
+function hrDisplayProbability(rankProb) {
+  return applyLogitOffset(rankProb, HR_DISPLAY_LOGIT_OFFSET);
+}
 
 function softCap(value, cap) {
   return cap * (1 - Math.exp(-Math.max(0, value) / cap));
@@ -931,9 +967,11 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor
   const pHr = clamp(softCap(rawPHr, MODEL.maxHrPerPa), 0.003, MODEL.maxHrPerPa);
   const rawProb = 1 - Math.pow(1 - pHr, ePAs);
   const prob = calibrateProbability(rawProb, ePAs);
+  const rankProb = prob;
+  const displayProb = hrDisplayProbability(rankProb);
 
   return {
-    prob, rawProb, pHr, seasonHrRate,
+    prob: rankProb, rankProb, displayProb, rawProb, pHr, seasonHrRate,
     isoAdj, contactAdj, recentAdj, awayAdj, pitcherRisk, platoon, parkFactor, parkAdj: hrParkFactor, ttoAdj: ttoFactor(lineupPos), gameEnvFactor,
     ePAs, batterHand, pitcherHand: pitcher.hand, batterSplit, pitcherSplit, awaySplit, isAway,
   };
@@ -989,7 +1027,19 @@ function classicScore(batter, pitcher, parkFactor, batterHand, lineupPos) {
   const leagueProb = 1 - Math.pow(1 - LEAGUE.hrPerPa, ePAs);
   const prob = clamp(leagueProb + ((rawProb - leagueProb) * 0.72), 0.025, 0.28);
 
-  return { prob, rawProb, pHr, isoAdj, slgAdj, contactAdj, recentAdj, pitcherRisk, platoon };
+  return {
+    prob,
+    rankProb: prob,
+    displayProb: prob,
+    rawProb,
+    pHr,
+    isoAdj,
+    slgAdj,
+    contactAdj,
+    recentAdj,
+    pitcherRisk,
+    platoon,
+  };
 }
 
 function fmtPct(n) { return `${Math.round(n * 100)}%`; }
@@ -1064,7 +1114,7 @@ function renderSummary(picks) {
         </div>
       </div>
       <div class="summary-time">${pick.gameTime || ''}</div>
-      <div class="summary-pct">${fmtPct(pick.prob)}</div>
+      <div class="summary-pct">${fmtPct(pick.displayProb ?? pick.prob)}</div>
     </div>`).join('')}
 </div>`;
 }
@@ -1114,11 +1164,11 @@ function rankPicks(picks, field, rankField) {
 }
 
 function mergedModelPicks(picks) {
-  rankPicks(picks, 'prob', 'currentRank');
-  rankPicks(picks, 'classicProb', 'classicRank');
+  rankPicks(picks, 'rankProb', 'currentRank');
+  rankPicks(picks, 'classicRankProb', 'classicRank');
 
-  const currentTop = limitSameGameAndTeam([...picks].sort((a, b) => b.prob - a.prob), 2);
-  const classicTop = limitSameGameAndTeam([...picks].sort((a, b) => b.classicProb - a.classicProb), 2);
+  const currentTop = limitSameGameAndTeam([...picks].sort((a, b) => b.rankProb - a.rankProb), 2);
+  const classicTop = limitSameGameAndTeam([...picks].sort((a, b) => b.classicRankProb - a.classicRankProb), 2);
   const merged = new Map();
 
   for (const pick of currentTop) merged.set(pick.key, { ...pick, inCurrentTop: true, inClassicTop: false });
@@ -1131,8 +1181,36 @@ function mergedModelPicks(picks) {
   return [...merged.values()].sort((a, b) => {
     const aBest = Math.min(a.currentRank || 999, a.classicRank || 999);
     const bBest = Math.min(b.currentRank || 999, b.classicRank || 999);
-    return aBest - bBest || b.prob - a.prob;
+    return aBest - bBest || b.rankProb - a.rankProb;
   });
+}
+
+function setHrPickOdds(key, value) {
+  const pick = currentHrPicks.find(item => item.key === key);
+  if (!pick) return;
+  pick.offeredAmericanOdds = value === '' ? '' : Number(value);
+  updateSavedHrBetFields(pick);
+  savePageCache();
+}
+
+function setHrBetPlaced(key, checked) {
+  const pick = currentHrPicks.find(item => item.key === key);
+  if (!pick) return;
+  pick.betPlaced = checked === true;
+  updateSavedHrBetFields(pick);
+  savePageCache();
+}
+
+function updateSavedHrBetFields(pick) {
+  if (!currentHrDate) return;
+  const saved = getSavedHrPicksForDate(currentHrDate);
+  if (!saved?.picks?.length) return;
+  const identity = hrPickIdentity(pick);
+  const savedPick = saved.picks.find(item => hrPickIdentity(item) === identity);
+  if (!savedPick) return;
+  savedPick.offeredAmericanOdds = pick.offeredAmericanOdds ?? '';
+  savedPick.betPlaced = pick.betPlaced === true;
+  storeHrPickPayload(saved);
 }
 
 function renderCard(pick, rank) {
@@ -1140,7 +1218,7 @@ function renderCard(pick, rank) {
   const rankLabel = medals[rank] || `Pick #${rank + 1}`;
   const parkInfo = HR_PARK[pick.homeTeamId];
   const parkName = parkInfo?.name ?? pick.venue;
-  const tier = hrTier(pick.prob);
+  const tier = hrTier(pick.displayProb ?? pick.prob);
   const hasRecent = pick.batter.recentHr != null;
   const classicPct = pick.classicProb != null ? fmtPct(pick.classicProb) : null;
   const recentText = hasRecent
@@ -1154,15 +1232,22 @@ function renderCard(pick, rank) {
   <div class="batter-team">${pick.batterTeam}</div>
 
   <div class="prob-row">
-    <div class="prob-pct">${fmtPct(pick.prob)}</div>
+    <div class="prob-pct">${fmtPct(pick.displayProb ?? pick.prob)}</div>
     <div class="prob-label">estimated<br>HR chance</div>
   </div>
   <div class="model-compare">
-    <span class="model-chip current">Current #${pick.currentRank ?? '?'} ${fmtPct(pick.prob)}</span>
+    <span class="model-chip current">Current #${pick.currentRank ?? '?'} ${fmtPct(pick.displayProb ?? pick.prob)}</span>
     ${classicPct != null ? `<span class="model-chip classic">Classic #${pick.classicRank ?? '?'} ${classicPct}</span>` : ''}
   </div>
   <div class="inline-note">Before calibration: ${fmtPct(pick.rawProb)} - single-trip HR rate: ${fmtPct(pick.pHr)}</div>
   <div class="inline-note ${tier.cls}">${tier.label}</div>
+
+  <div class="bet-input-row">
+    <label>American odds
+      <input type="number" value="${pick.offeredAmericanOdds ?? ''}" placeholder="+650" oninput="setHrPickOdds('${pick.key}', this.value)">
+    </label>
+    <label><input type="checkbox" ${pick.betPlaced ? 'checked' : ''} onchange="setHrBetPlaced('${pick.key}', this.checked)"> Bet placed</label>
+  </div>
 
   <div class="matchup-line">vs ${pick.pitcherName} (${pick.pitcherHand === 'L' ? 'lefty pitcher' : 'righty pitcher'})</div>
   <div class="game-time">${pick.gameTime} - ${pick.venue}</div>
@@ -1308,7 +1393,7 @@ function renderSavedHrSnapshot(saved) {
     <div class="summary-row">
       <div class="summary-rank">#${pick.rank}</div>
       <div class="summary-name">${pick.batterName}</div>
-      <div class="summary-pct">${fmtPct(pick.prob)}</div>
+      <div class="summary-pct">${fmtPct(pick.displayProb ?? pick.prob)}</div>
     </div>`;
   }).join('');
 
@@ -1384,8 +1469,13 @@ const HR_ANALYSIS_COLUMNS = [
   'Venue',
   'Current Rank',
   'Current Chance',
+  'Rank Probability',
+  'Display Probability',
+  'Calibration Offset',
   'Classic Rank',
   'Classic Chance',
+  'Classic Rank Probability',
+  'Classic Display Probability',
   'In Current Top',
   'In Classic Top',
   'Selected By',
@@ -1395,6 +1485,17 @@ const HR_ANALYSIS_COLUMNS = [
   'Game PK',
   'Batter ID',
   'Prediction ID',
+  'Recent Sample PA',
+  'Recent HR',
+  'Recent HR/PA',
+  'Recent SLG',
+  'Classic Recent Adj',
+  'Classic Contact Adj',
+  'Classic SLG Adj',
+  'Classic Pitcher Risk',
+  'Classic Platoon',
+  'Offered American Odds',
+  'Bet Placed',
 ];
 
 function tsvCell(value) {
@@ -1439,6 +1540,7 @@ function normalizeSavedHrPayload(payload) {
   const fallbackCapturedAt = payload.firstSavedAt || payload.savedAt || '';
   const picks = (payload.picks || []).map(pick => ({
     ...pick,
+    key: pick.key || hrPickIdentity(pick),
     capturedAt: pick.capturedAt || fallbackCapturedAt,
     captureRun: hrPickCaptureRun(pick),
     predictionId: pick.predictionId || hrPredictionId(payload.date, pick),
@@ -1451,7 +1553,7 @@ function normalizeSavedHrPayload(payload) {
   return {
     ...payload,
     firstSavedAt: fallbackCapturedAt,
-    modelMetadataVersion: Math.max(payload.modelMetadataVersion || 1, 2),
+    modelMetadataVersion: Math.max(payload.modelMetadataVersion || 1, 3),
     captureCount,
     picks,
   };
@@ -1510,10 +1612,13 @@ function hasSavedHrPicksForDate(date) {
 
 function hrPickPayload(pick, idx, capturedAt, captureRun, date = currentHrDate) {
   return {
+    key: pick.key || hrPickIdentity(pick),
     rank: idx + 1,
     currentRank: Number.isFinite(pick.currentRank) ? pick.currentRank : null,
     classicRank: Number.isFinite(pick.classicRank) ? pick.classicRank : null,
-    classicProb: Number.isFinite(pick.classicProb) ? pick.classicProb : null,
+    classicProb: Number.isFinite(pick.classicRankProb ?? pick.classicProb) ? (pick.classicRankProb ?? pick.classicProb) : null,
+    classicRankProb: Number.isFinite(pick.classicRankProb ?? pick.classicProb) ? (pick.classicRankProb ?? pick.classicProb) : null,
+    classicDisplayProb: Number.isFinite(pick.classicDisplayProb ?? pick.classicProb) ? (pick.classicDisplayProb ?? pick.classicProb) : null,
     inCurrentTop: typeof pick.inCurrentTop === 'boolean' ? pick.inCurrentTop : null,
     inClassicTop: typeof pick.inClassicTop === 'boolean' ? pick.inClassicTop : null,
     gamePk: pick.gamePk,
@@ -1521,7 +1626,9 @@ function hrPickPayload(pick, idx, capturedAt, captureRun, date = currentHrDate) 
     batterId: pick.batterId,
     batterName: pick.batterName,
     batterTeam: pick.batterTeam,
-    prob: pick.prob,
+    prob: pick.rankProb ?? pick.prob,
+    rankProb: pick.rankProb ?? pick.prob,
+    displayProb: pick.displayProb ?? pick.prob,
     rawProb: pick.rawProb,
     pHr: pick.pHr,
     isoAdj: pick.isoAdj,
@@ -1533,12 +1640,24 @@ function hrPickPayload(pick, idx, capturedAt, captureRun, date = currentHrDate) 
     parkAdj: pick.parkAdj ?? pick.parkFactor,
     recentAdj: pick.recentAdj,
     contactAdj: pick.contactAdj,
+    recentSamplePa: pick.batter?.recentPa ?? pick.recentSamplePa ?? null,
+    recentHr: pick.batter?.recentHr ?? pick.recentHr ?? null,
+    recentHrPerPa: pick.batter?.recentHrPerPa ?? pick.recentHrPerPa ?? null,
+    recentSlg: pick.batter?.recentSlg ?? pick.recentSlg ?? null,
+    classicRecentAdj: pick.classicRecentAdj,
+    classicContactAdj: pick.classicContactAdj,
+    classicSlgAdj: pick.classicSlgAdj,
+    classicPitcherRisk: pick.classicPitcherRisk,
+    classicPlatoon: pick.classicPlatoon,
     platoon: pick.platoon,
     pitcherName: pick.pitcherName,
     pitcherHand: pick.pitcherHand,
     lineupPos: pick.lineupPos,
     venue: pick.venue,
     gameTime: pick.gameTime,
+    calibrationOffset: HR_DISPLAY_LOGIT_OFFSET,
+    offeredAmericanOdds: pick.offeredAmericanOdds ?? '',
+    betPlaced: pick.betPlaced === true,
     capturedAt,
     captureRun,
     predictionId: hrPredictionId(date, pick),
@@ -1550,7 +1669,7 @@ function currentHrPickPayload(capturedAt = new Date().toISOString(), captureRun 
     date: currentHrDate,
     savedAt: capturedAt,
     firstSavedAt: capturedAt,
-    modelMetadataVersion: 2,
+    modelMetadataVersion: 3,
     captureCount: captureRun,
     picks: currentHrPicks.map((pick, idx) =>
       hrPickPayload(pick, idx, capturedAt, captureRun, currentHrDate)
@@ -1584,7 +1703,7 @@ function appendCurrentHrPickPayload(existing) {
       ...saved,
       savedAt: capturedAt,
       firstSavedAt: saved.firstSavedAt || saved.savedAt || capturedAt,
-      modelMetadataVersion: 2,
+      modelMetadataVersion: 3,
       captureCount: captureRun,
       picks: [...saved.picks, ...added],
     },
@@ -1669,7 +1788,7 @@ function hrAnalysisRow(date, pick, result = '', hr = '', source = 'pick') {
     pick.rank,
     pick.batterName,
     pick.batterTeam,
-    fmtPct(pick.prob),
+    fmtPct(pick.displayProb ?? pick.prob),
     result,
     outcome,
     hr,
@@ -1688,9 +1807,14 @@ function hrAnalysisRow(date, pick, result = '', hr = '', source = 'pick') {
     pick.pitcherHand === 'L' ? 'Lefty' : 'Righty',
     pick.venue,
     Number.isFinite(pick.currentRank) ? pick.currentRank : (isAudit ? pick.rank : ''),
-    decText(pick.prob, 4),
+    decText(pick.rankProb ?? pick.prob, 4),
+    decText(pick.rankProb ?? pick.prob, 4),
+    decText(pick.displayProb ?? pick.prob, 4),
+    decText(pick.calibrationOffset ?? HR_DISPLAY_LOGIT_OFFSET, 4),
     Number.isFinite(pick.classicRank) ? pick.classicRank : '',
-    decText(pick.classicProb, 4),
+    decText(pick.classicDisplayProb ?? pick.classicProb, 4),
+    decText(pick.classicRankProb ?? pick.classicProb, 4),
+    decText(pick.classicDisplayProb ?? pick.classicProb, 4),
     isAudit ? '' : savedModelFlag(pick.inCurrentTop),
     isAudit ? '' : savedModelFlag(pick.inClassicTop),
     isAudit ? '' : savedModelSelection(pick),
@@ -1700,6 +1824,17 @@ function hrAnalysisRow(date, pick, result = '', hr = '', source = 'pick') {
     pick.gamePk || '',
     pick.batterId || '',
     isAudit ? '' : (pick.predictionId || hrPredictionId(date, pick)),
+    pick.recentSamplePa ?? pick.batter?.recentPa ?? '',
+    pick.recentHr ?? pick.batter?.recentHr ?? '',
+    decText(pick.recentHrPerPa ?? pick.batter?.recentHrPerPa, 4),
+    decText(pick.recentSlg ?? pick.batter?.recentSlg, 4),
+    decText(pick.classicRecentAdj),
+    decText(pick.classicContactAdj),
+    decText(pick.classicSlgAdj),
+    decText(pick.classicPitcherRisk),
+    decText(pick.classicPlatoon),
+    isAudit ? '' : (pick.offeredAmericanOdds ?? ''),
+    isAudit ? '' : (pick.betPlaced === true ? 1 : pick.betPlaced === false ? 0 : ''),
   ];
 }
 
@@ -2137,6 +2272,8 @@ window.copyHrAnalysisRowsForSheets = copyHrAnalysisRowsForSheets;
 window.runHrBacktest = runHrBacktest;
 window.copyHrBacktestAuditRows = copyHrBacktestAuditRows;
 window.copyHrBacktestCombinedRows = copyHrBacktestCombinedRows;
+window.setHrPickOdds = setHrPickOdds;
+window.setHrBetPlaced = setHrBetPlaced;
 
 async function main() {
   const date = todayStr();
@@ -2259,8 +2396,15 @@ async function main() {
       batter: { ...batter },
       pitcher,
       ...s,
-      classicProb: classic.prob,
+      classicProb: classic.rankProb,
+      classicRankProb: classic.rankProb,
+      classicDisplayProb: classic.displayProb,
       classicPHr: classic.pHr,
+      classicRecentAdj: classic.recentAdj,
+      classicContactAdj: classic.contactAdj,
+      classicSlgAdj: classic.slgAdj,
+      classicPitcherRisk: classic.pitcherRisk,
+      classicPlatoon: classic.platoon,
     });
   }
 
@@ -2271,14 +2415,21 @@ async function main() {
       pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, gameEnvFactor, pick.side === 'away'
     ));
     const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos);
-    pick.classicProb = classic.prob;
+    pick.classicProb = classic.rankProb;
+    pick.classicRankProb = classic.rankProb;
+    pick.classicDisplayProb = classic.displayProb;
     pick.classicPHr = classic.pHr;
+    pick.classicRecentAdj = classic.recentAdj;
+    pick.classicContactAdj = classic.contactAdj;
+    pick.classicSlgAdj = classic.slgAdj;
+    pick.classicPitcherRisk = classic.pitcherRisk;
+    pick.classicPlatoon = classic.platoon;
   }
-  rankPicks(candidates, 'prob', 'currentRank');
-  rankPicks(candidates, 'classicProb', 'classicRank');
+  rankPicks(candidates, 'rankProb', 'currentRank');
+  rankPicks(candidates, 'classicRankProb', 'classicRank');
   const top30Keys = new Set([
-    ...[...candidates].sort((a, b) => b.prob - a.prob).slice(0, 30).map(p => p.key),
-    ...[...candidates].sort((a, b) => b.classicProb - a.classicProb).slice(0, 30).map(p => p.key),
+    ...[...candidates].sort((a, b) => b.rankProb - a.rankProb).slice(0, 30).map(p => p.key),
+    ...[...candidates].sort((a, b) => b.classicRankProb - a.classicRankProb).slice(0, 30).map(p => p.key),
   ]);
   const top30 = candidates.filter(p => top30Keys.has(p.key));
 
@@ -2309,8 +2460,19 @@ async function main() {
       pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos, gameEnvFactor, pick.side === 'away'
     ));
     const classic = classicScore(pick.batter, pick.pitcher, pick.parkFactor, pick.batterHand, pick.lineupPos);
-    pick.classicProb = classic.prob;
+    pick.classicProb = classic.rankProb;
+    pick.classicRankProb = classic.rankProb;
+    pick.classicDisplayProb = classic.displayProb;
     pick.classicPHr = classic.pHr;
+    pick.classicRecentAdj = classic.recentAdj;
+    pick.classicContactAdj = classic.contactAdj;
+    pick.classicSlgAdj = classic.slgAdj;
+    pick.classicPitcherRisk = classic.pitcherRisk;
+    pick.classicPlatoon = classic.platoon;
+    pick.recentSamplePa = pick.batter.recentPa ?? null;
+    pick.recentHr = pick.batter.recentHr ?? null;
+    pick.recentHrPerPa = pick.batter.recentHrPerPa ?? null;
+    pick.recentSlg = pick.batter.recentSlg ?? null;
   }));
 
   const topPicks = mergedModelPicks(top30);
