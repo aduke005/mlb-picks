@@ -610,9 +610,10 @@ const API    = 'https://statsapi.mlb.com/api/v1';
 const SEASON = new Date().getFullYear();
 const PICK_STORE_KEY = 'mlb-hit-picks-saved-v1';
 const PICK_HISTORY_KEY = 'mlb-hit-picks-history-v1';
-const PAGE_CACHE_KEY = 'mlb-hit-picks-page-cache-v2';
+const PAGE_CACHE_KEY = 'mlb-hit-picks-page-cache-v3';
 const FORCE_REFRESH_KEY = 'mlb-hit-picks-force-refresh-v1';
 const PAGE_CACHE_TTL = 15 * 60 * 1000;
+const HIT_SELECTION_POLICY_VERSION = 5;
 
 let currentPickDate = null;
 let currentTopPicks = [];
@@ -1158,9 +1159,6 @@ function renderCard(pick, rank) {
   const rankLabel = `Pick #${rank + 1}`;
   const pct    = Math.round((pick.displayProb ?? pick.prob) * 100);
   const rawPct = Math.round((pick.rawProb ?? pick.prob) * 100);
-  const classicPct = Number.isFinite(pick.classicDisplayProb)
-    ? Math.round(pick.classicDisplayProb * 100)
-    : null;
 
   const parkInfo = PARK[pick.homeTeamId];
   const parkName = parkInfo?.name ?? pick.venue;
@@ -1191,10 +1189,6 @@ function renderCard(pick, rank) {
   <div class="prob-row">
     <div class="prob-pct">${pct}%</div>
     <div class="prob-label">calibrated<br>chance of at least one hit</div>
-  </div>
-  <div class="model-compare">
-    <span class="model-chip current">Current #${pick.currentRank ?? '?'} ${pct}%</span>
-    <span class="model-chip classic">Classic #${pick.classicRank ?? '?'}${classicPct != null ? ` ${classicPct}%` : ' · rank only'}</span>
   </div>
   <div class="inline-note">Before calibration: ${rawPct}% - single-trip hit rate: ${Math.round(pick.pHit * 100)}%</div>
 
@@ -1297,15 +1291,10 @@ function renderCard(pick, rank) {
 function renderSummary(picks) {
   const rows = picks.map((pick, i) => {
     return `
-    ${i === 0 ? '<div class="summary-tier">Current top-10 picks selected by both models</div>' : ''}
+    ${i === 0 ? '<div class="summary-tier">Top 10 by current-model hit probability</div>' : ''}
     <div class="summary-row">
       <div class="summary-rank">#${i + 1}</div>
-      <div class="summary-name">${pick.batterName}
-        <div class="model-compare">
-          <span class="model-chip current">Cur #${pick.currentRank ?? '?'}</span>
-          <span class="model-chip classic">Cls #${pick.classicRank ?? '?'}</span>
-        </div>
-      </div>
+      <div class="summary-name">${pick.batterName}</div>
       <div class="summary-time">${pick.gameTime || ''}</div>
       <div class="summary-pct">${Math.round((pick.displayProb ?? pick.prob) * 100)}%</div>
     </div>`;
@@ -1316,25 +1305,6 @@ function renderSummary(picks) {
   <div class="summary-title">Quick Picks</div>
   ${rows}
 </div>`;
-}
-
-function renderHitWatchlist(shadowPicks) {
-  const currentOnly = shadowPicks
-    .filter(pick => pick.inCurrentTop === true && pick.inClassicTop !== true)
-    .sort((a, b) => (a.currentRank || 999) - (b.currentRank || 999));
-  if (!currentOnly.length) return '';
-  return `
-<details class="summary-list">
-  <summary class="summary-title">Current-only watchlist (${currentOnly.length})</summary>
-  <div class="summary-tier">Not primary recommendations; retained for comparison</div>
-  ${currentOnly.map(pick => `
-    <div class="summary-row">
-      <div class="summary-rank">#${pick.currentRank ?? '?'}</div>
-      <div class="summary-name">${pick.batterName}</div>
-      <div class="summary-time">${pick.gameTime || ''}</div>
-      <div class="summary-pct">${pctText(pick.displayProb ?? pick.prob)}</div>
-    </div>`).join('')}
-</details>`;
 }
 
 function getPickHistory() {
@@ -1506,23 +1476,10 @@ function renderPickTracker() {
 </div>`;
 }
 
-function limitSameGameAndTeam(picks, limit = 2) {
-  const gameCounts = new Map();
-  const teamCounts = new Map();
-  const selected = [];
-
-  for (const pick of picks) {
-    const gameKey = pick.gamePk;
-    const teamKey = pick.batterTeam;
-    if ((gameCounts.get(gameKey) || 0) >= limit) continue;
-    if ((teamCounts.get(teamKey) || 0) >= limit) continue;
-    selected.push(pick);
-    gameCounts.set(gameKey, (gameCounts.get(gameKey) || 0) + 1);
-    teamCounts.set(teamKey, (teamCounts.get(teamKey) || 0) + 1);
-    if (selected.length >= MODEL.topPickCount) break;
-  }
-
-  return selected;
+function topHitCandidates(picks, field) {
+  return [...picks]
+    .sort((a, b) => (b[field] ?? 0) - (a[field] ?? 0))
+    .slice(0, MODEL.topPickCount);
 }
 
 function rankPicks(picks, field, rankField) {
@@ -1531,27 +1488,14 @@ function rankPicks(picks, field, rankField) {
     .forEach((pick, i) => { pick[rankField] = i + 1; });
 }
 
-function isConsensusPick(pick) {
-  return pick.inCurrentTop === true && pick.inClassicTop === true;
-}
-
 function compareHitDisplayPicks(a, b) {
-  const consensusOrder = Number(isConsensusPick(b)) - Number(isConsensusPick(a));
-  if (consensusOrder) return consensusOrder;
-  return ((b.rankProb ?? b.prob) - (a.rankProb ?? a.prob))
-    || ((a.currentRank || 999) - (b.currentRank || 999))
+  return ((a.currentRank || 999) - (b.currentRank || 999))
     || ((a.classicRank || 999) - (b.classicRank || 999));
 }
 
 function hitModelPickLists(picks) {
-  const currentTop = limitSameGameAndTeam(
-    [...picks].sort((a, b) => (b.rankProb ?? b.prob) - (a.rankProb ?? a.prob)),
-    2
-  );
-  const classicTop = limitSameGameAndTeam(
-    [...picks].sort((a, b) => (b.classicRankProb ?? b.classicProb) - (a.classicRankProb ?? a.classicProb)),
-    2
-  );
+  const currentTop = topHitCandidates(picks, 'rankProb');
+  const classicTop = topHitCandidates(picks, 'classicRankProb');
   const merged = new Map();
 
   for (const pick of currentTop) merged.set(pick.key, { ...pick, inCurrentTop: true, inClassicTop: false });
@@ -1562,15 +1506,15 @@ function hitModelPickLists(picks) {
   }
 
   const union = [...merged.values()].sort(compareHitDisplayPicks);
-  const primary = union
-    .filter(pick => isConsensusPick(pick) && (pick.currentRank || 999) <= MODEL.topPickCount)
+  const primary = currentTop
+    .map(pick => merged.get(pick.key))
     .sort((a, b) => (a.currentRank || 999) - (b.currentRank || 999));
   const primaryKeys = new Set(primary.map(pick => pick.key));
   const shadow = union
     .filter(pick => !primaryKeys.has(pick.key))
     .map(pick => ({
       ...pick,
-      selectionTier: pick.inCurrentTop ? 'current-watchlist' : 'classic-only',
+      selectionTier: 'classic-only',
     }));
 
   return { primary, shadow, union };
@@ -1615,10 +1559,7 @@ function hitShadowTrackingPicks(candidates, lists) {
   ];
 
   for (const variant of variants) {
-    const top = limitSameGameAndTeam(
-      [...candidates].sort((a, b) => b[variant.field] - a[variant.field]),
-      2
-    );
+    const top = topHitCandidates(candidates, variant.field);
     for (const pick of top) {
       const primary = primaryByKey.get(pick.key);
       if (primary) {
@@ -1698,7 +1639,7 @@ function currentPickPayload(capturedAt = new Date().toISOString(), captureRun = 
     date: currentPickDate,
     savedAt: capturedAt,
     firstSavedAt: capturedAt,
-    modelMetadataVersion: 4,
+    modelMetadataVersion: HIT_SELECTION_POLICY_VERSION,
     captureCount: captureRun,
     picks: currentTopPicks.map((pick, idx) =>
       pickPayload(pick, idx, capturedAt, captureRun, currentPickDate)
@@ -1760,7 +1701,7 @@ function appendCurrentPickPayload(existing) {
       ...saved,
       savedAt: capturedAt,
       firstSavedAt: saved.firstSavedAt || saved.savedAt || capturedAt,
-      modelMetadataVersion: 4,
+      modelMetadataVersion: HIT_SELECTION_POLICY_VERSION,
       captureCount: captureRun,
       picks: [...saved.picks, ...added],
       shadowPicks: [...shadowByIdentity.values()],
@@ -1781,6 +1722,17 @@ function saveCurrentPicks() {
   }
 
   const existing = getSavedPicksForDate(currentPickDate);
+  if (hasHitTrackingRows(existing) && existing.modelMetadataVersion < HIT_SELECTION_POLICY_VERSION) {
+    const payload = storePickPayload(currentPickPayload());
+    lastCheckedPickRows = null;
+    lastCheckedPickDate = null;
+    if (out) {
+      out.textContent = `Replaced the older shortlist with ${payload.picks.length} current-model top picks ` +
+        `and ${payload.shadowPicks.length} silent audit candidates.`;
+    }
+    savePageCache();
+    return;
+  }
   if (hasHitTrackingRows(existing)) {
     const merged = appendCurrentPickPayload(existing);
     if (!merged.addedCount && !merged.shadowAddedCount && !merged.shadowUpdatedCount) {
@@ -2692,23 +2644,19 @@ async function main() {
 
   rankPicks(candidates, 'rankProb', 'currentRank');
   rankPicks(candidates, 'classicRankProb', 'classicRank');
-  scoreHitRecencyShadows(candidates, gameEnvFactors);
+  scoreHitRecencyShadows(top30, gameEnvFactors);
   const lists = hitModelPickLists(top30);
   const topPicks = lists.primary;
-  const shadowPicks = hitShadowTrackingPicks(candidates, lists);
+  const shadowPicks = hitShadowTrackingPicks(top30, lists);
 
   currentPickDate = date;
   currentTopPicks = topPicks;
   currentHitShadowPicks = shadowPicks;
 
   if (!topPicks.length) {
-    const emptyState = shadowPicks.length
-      ? `<div class="info-box"><strong>No Primary Picks Today</strong>No candidate was selected by both models while also ranking in the current model's top 10. This can be a legitimate thin slate, not a data failure. The ${shadowPicks.length} excluded candidates remain available as shadow rows.</div>`
-      : `<div class="info-box"><strong>No Actionable Picks Today</strong>No candidates had enough usable lineup and player data. Try again after lineups and probable pitchers are confirmed.</div>`;
     show(
-      renderHitWatchlist(shadowPicks) +
       renderPickTracker() +
-      emptyState +
+      `<div class="info-box"><strong>No Actionable Picks Today</strong>No candidates had enough usable lineup and player data. Try again after lineups and probable pitchers are confirmed.</div>` +
       renderBacktestPanel()
     );
     savePageCache();
@@ -2717,8 +2665,7 @@ async function main() {
 
   show(
     renderSummary(topPicks) +
-    `<div class="note">Primary recommendations require both models and a current-model rank of 10 or better. ${shadowPicks.length} excluded candidates are still saved as shadow rows for evaluation.</div>` +
-    renderHitWatchlist(shadowPicks) +
+    `<div class="note">These are the 10 highest current-model hit probabilities. Classic and recent-form alternatives are tracked silently for evaluation.</div>` +
     renderPickTracker() +
     topPicks.map((p, i) => renderCard(p, i)).join('') +
     `<button class="refresh-btn" onclick="refreshPage()">↻ Refresh</button>` +
@@ -2818,7 +2765,6 @@ function renderSavedPickSnapshot(saved) {
   ${rows}
   ${shadowSummary}
 </div>
-${hasPrimary ? '' : renderHitWatchlist(normalized.shadowPicks)}
 ${renderPickTracker()}
 <div class="info-box">
   <strong>Showing the saved slate for ${formatDate(normalized.date)}</strong>
@@ -2831,7 +2777,9 @@ ${renderBacktestPanel()}`;
 }
 
 function restoreSavedPickView() {
-  const saved = getSavedPicksForDate(todayStr()) || getSavedPicksForResults();
+  const todaySaved = getSavedPicksForDate(todayStr());
+  if (todaySaved && todaySaved.modelMetadataVersion < HIT_SELECTION_POLICY_VERSION) return false;
+  const saved = todaySaved || getSavedPicksForResults();
   if (!hasHitTrackingRows(saved)) return false;
   currentPickDate = saved.date;
   currentTopPicks = saved.picks;

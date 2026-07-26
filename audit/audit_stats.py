@@ -285,7 +285,7 @@ def hit_recency_arm_comparison(picks, shadows):
     ]
 
     print("\nHit recent-form arm comparison")
-    print("All arms use the same capped top-10 policy; the shipped consensus rule is separate.")
+    print("All arms use the same pure top-10 policy; Arm A is the displayed list.")
     if not eligible:
         print("No completed rows with explicit arm membership yet.")
         return
