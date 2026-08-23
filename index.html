@@ -644,9 +644,9 @@ const MODEL = {
   topPickCount: 10,
 };
 
-// Ranking and displayed probability are intentionally separate. Keep the
-// production ranking frozen while rolling calibration is evaluated offline.
-const HIT_DISPLAY_LOGIT_OFFSET = 0.0;
+// Ranking and displayed probability are intentionally separate. This offset
+// corrects the observed probability bias without changing the top-10 order.
+const HIT_DISPLAY_LOGIT_OFFSET = -0.14;
 
 // Park hit factors by home-team ID (FanGraphs 3-yr regressed hits, 2024)
 const PARK = {
@@ -908,7 +908,7 @@ async function getBatterRecent(id, startDate, endDate) {
 
 // ─── Scoring ──────────────────────────────────────────────────────────────────
 //
-// P(hit per PA) = batterBase × pitcherWeakness × platoon × park × gameEnv
+// P(hit per PA) = batterBase × pitcherWeakness × platoon
 // P(≥1 hit)    = 1 − (1 − pHit)^expectedPAs
 //
 // batterBase = season_BA × opsAdj × recentAdj × contactAdj
@@ -940,25 +940,10 @@ function calibrateProbability(rawProb, ePAs) {
   );
 }
 
-function average(values) {
-  const nums = values.filter(v => Number.isFinite(v));
-  if (!nums.length) return null;
-  return nums.reduce((sum, v) => sum + v, 0) / nums.length;
-}
-
 function hitGameEnvironmentFactors(candidates) {
-  const grouped = new Map();
-  for (const pick of candidates) {
-    if (!grouped.has(pick.gamePk)) grouped.set(pick.gamePk, []);
-    grouped.get(pick.gamePk).push(pick);
-  }
-
-  const factors = new Map();
-  for (const [gamePk, picks] of grouped.entries()) {
-    const avgEnv = average(picks.map(p => p.pitcherWeakness));
-    factors.set(gamePk, avgEnv == null ? 1.0 : clamp(shrink(avgEnv, 1.0, picks.length, 12), 0.99, 1.02));
-  }
-  return factors;
+  // Pitcher weakness is already applied per batter. Keep the exported field
+  // neutral instead of multiplying the same signal into the score twice.
+  return new Map(candidates.map(pick => [pick.gamePk, 1.0]));
 }
 
 function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor = 1.0, isAway = false, recentOptions = null) {
@@ -1042,7 +1027,7 @@ function score(batter, pitcher, parkFactor, batterHand, lineupPos, gameEnvFactor
   );
 
   const parkAdj = 1.0;
-  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkAdj * gameEnvFactor, 0.04, MODEL.maxPerPaHit);
+  const pHit  = clamp(batterBase * pitcherWeakness * platoon * parkAdj, 0.04, MODEL.maxPerPaHit);
   const ePAs  = expectedPAs(lineupPos);
   const rawProb = 1 - Math.pow(1 - pHit, ePAs);
   const prob = calibrateProbability(rawProb, ePAs);

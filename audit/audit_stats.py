@@ -152,7 +152,10 @@ def source_analysis(label, rows, chance_col, factors, include_rank=True):
 
 
 def truthy(value):
-    return str(value).strip().lower() in {"1", "true", "yes"}
+    numeric = num(value)
+    if numeric is not None:
+        return math.isfinite(numeric) and numeric != 0
+    return str(value).strip().lower() in {"true", "yes"}
 
 
 def model_selection(row):
@@ -385,9 +388,15 @@ def analyze(label, rows, chance_col, factors, compare_hit_recency=False):
 def rows_matching(all_rows, label, prefer=None):
     label_lower = label.lower()
     if label_lower.startswith("hit"):
-        names = [name for name in all_rows if name.strip().lower().startswith("hit")]
+        names = [
+            name for name, rows in all_rows.items()
+            if any("Chance" in row and "HR Chance" not in row for row in rows)
+        ]
     elif label_lower.startswith("hr"):
-        names = [name for name in all_rows if name.strip().lower().startswith("hr")]
+        names = [
+            name for name, rows in all_rows.items()
+            if any("HR Chance" in row for row in rows)
+        ]
     else:
         names = [name for name in all_rows if label_lower in name.lower()]
     if prefer:
@@ -410,13 +419,13 @@ def main():
     hit_rows = rows_matching(all_rows, "Hit Analysis", prefer="v2")
 
     analyze(
-        "HR v2 combined",
+        "HR combined",
         hr_rows,
         "HR Chance",
         ["Single-trip HR Rate", "Power Adj", "Pitcher Risk", "Road Adj", "TTO Adj", "Game Env", "Park", "Recent Adj", "Contact Adj", "Handedness"],
     )
     analyze(
-        "Hit v2 combined",
+        "Hit combined",
         hit_rows,
         "Chance",
         ["Single-trip Hit Rate", "Pitcher Weakness", "Handedness", "Road Adj", "TTO Adj", "Game Env", "Park", "Recent Adj", "Contact Adj", "OPS Adj"],
